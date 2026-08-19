@@ -18,6 +18,13 @@ Campos utilizados na seleção: `domain_id`, `status`, `text`, `text_md5` e
 `same_as`. URLs, títulos, HTML, timestamps e IDs não entram no texto nem nos
 relatórios.
 
+Na fonte, `text` não está em texto puro: contém um frame Zstandard codificado
+como hexadecimal. O adapter converte hexadecimal para bytes, descompacta ZSTD,
+exige UTF-8 estrito e compara o conteúdo descompactado contra `text_md5` antes
+da limpeza e tokenização. Divergências de MD5 observadas na fonte são mantidas
+e contabilizadas em `text_md5_mismatches`; payloads inválidos ou maiores que
+128 MiB são rejeitados sem registrar conteúdo.
+
 ## Seleção
 
 São elegíveis apenas registros que satisfazem todas as regras:
@@ -26,8 +33,12 @@ São elegíveis apenas registros que satisfazem todas as regras:
 status == "done"
 text presente
 text_md5 presente
-same_as ausente
+same_as ausente (campo vazio ou marcador literal "NULL")
 ```
+
+Referências reais em `same_as`, como IDs numéricos, continuam excluídas. O
+marcador textual `NULL` representa ausência na fonte e não é tratado como uma
+referência.
 
 O perfil `smoke` usa um prefixo limitado para engenharia. O `mvp` faz uma
 passagem sequencial completa, calcula o fingerprint durante a leitura e mantém

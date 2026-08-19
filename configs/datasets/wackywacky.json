@@ -7,6 +7,8 @@
     "path": "wacky/pages.tsv",
     "format": "tsv",
     "encoding": "utf-8",
+    "text_encoding": "hex-zstd-utf8",
+    "max_decompressed_text_bytes": 134217728,
     "columns": [
       "id",
       "domain_id",
@@ -36,7 +38,9 @@
     "status": "done",
     "require_text": true,
     "require_text_md5": true,
+    "text_md5_policy": "count_mismatch",
     "exclude_same_as": true,
+    "same_as_null_values": ["", "NULL"],
     "boilerplate": {
       "decision": "pending",
       "minimum_paragraph_characters": 80,

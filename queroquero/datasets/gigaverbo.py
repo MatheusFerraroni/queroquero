@@ -2,12 +2,21 @@ from __future__ import annotations
 
 import fnmatch
 import itertools
+import json
 import math
+import os
+import random
 import re
 from collections.abc import Callable, Iterable, Mapping
+from pathlib import Path
 from typing import Any
 
-from queroquero.config import canonical_json_bytes, sha256_bytes
+from queroquero.config import (
+    ConfigError,
+    canonical_json_bytes,
+    resolve_dataset_root,
+    sha256_bytes,
+)
 
 from .base import CheckpointCallback, Document, ScanResult, clean_text, stable_hash
 
@@ -19,7 +28,7 @@ SPLIT = "train"
 LICENSE_POLICY = "internal_research_only"
 
 _SAFE_LABEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/+\-]{0,127}\Z")
-_HEX_DIGEST_RE = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?\Z")
+_SHA256_RE = re.compile(r"[0-9a-fA-F]{64}\Z")
 
 
 class GigaverboAdapter:
@@ -28,10 +37,8 @@ class GigaverboAdapter:
     def __init__(
         self,
         load_dataset_fn: Callable[..., Any] | None = None,
-        hf_api: Any | None = None,
     ) -> None:
         self._load_dataset_fn = load_dataset_fn
-        self._hf_api = hf_api
 
     def scan(
         self,
@@ -41,7 +48,10 @@ class GigaverboAdapter:
         checkpoint: CheckpointCallback | None = None,
     ) -> ScanResult:
         source, filters, selection, profile, seed = _read_config(config)
-        source_fingerprint = self._source_fingerprint(source)
+        source_directory, shard_paths = _local_shards(config, source)
+        source_fingerprint = _source_fingerprint(
+            source_directory, shard_paths, source
+        )
 
         documents = list(resume_documents or [])
         candidate_limit = profile["candidate_documents"]
@@ -63,10 +73,10 @@ class GigaverboAdapter:
             raise ValueError("resume cursor exceeds the configured source-record limit")
 
         if len(documents) < candidate_limit and cursor["records_seen"] < max_source_records:
-            stream = self._load_stream(source)
+            stream = self._load_stream(shard_paths)
             stream = stream.shuffle(
                 seed=seed,
-                buffer_size=selection["shuffle_buffer_size"],
+                buffer_size=profile["shuffle_buffer_size"],
             )
             records = _skip_records(stream, cursor["records_seen"])
             remaining = max_source_records - cursor["records_seen"]
@@ -131,81 +141,16 @@ class GigaverboAdapter:
             cursor=dict(cursor),
         )
 
-    def _load_stream(self, source: dict[str, Any]) -> Any:
+    def _load_stream(self, shard_paths: list[Path]) -> Any:
         load_dataset_fn = self._load_dataset_fn
-        if load_dataset_fn is None:
-            from datasets import load_dataset
-
-            load_dataset_fn = load_dataset
-        return load_dataset_fn(
-            path=source["dataset_id"],
-            name=source["config_name"],
-            split=source["split"],
-            revision=source["revision"],
-            streaming=True,
-        )
-
-    def _source_fingerprint(self, source: dict[str, Any]) -> dict[str, Any]:
-        hf_api = self._hf_api
-        if hf_api is None:
-            from huggingface_hub import HfApi
-
-            hf_api = HfApi()
-
-        info = hf_api.dataset_info(
-            repo_id=source["dataset_id"],
-            revision=source["revision"],
-            files_metadata=True,
-        )
-        resolved_revision = _read_value(info, "sha")
-        if resolved_revision is not None and resolved_revision != REVISION:
-            raise ValueError("Hugging Face resolved an unexpected dataset revision")
-
-        siblings = _read_value(info, "siblings")
-        if not isinstance(siblings, Iterable) or isinstance(siblings, (str, bytes)):
-            raise ValueError("dataset metadata does not contain a shard listing")
-
-        shards = []
-        for sibling in siblings:
-            path = _read_value(sibling, "rfilename")
-            if not isinstance(path, str) or not fnmatch.fnmatchcase(
-                path, source["shard_glob"]
-            ):
-                continue
-            if not _safe_repo_path(path):
-                raise ValueError("dataset metadata contains an unsafe shard path")
-
-            metadata: dict[str, Any] = {"path": path}
-            size = _read_value(sibling, "size")
-            if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
-                metadata["size"] = size
-
-            lfs = _read_value(sibling, "lfs")
-            sha256 = _read_value(lfs, "sha256")
-            if isinstance(sha256, str) and _HEX_DIGEST_RE.fullmatch(sha256):
-                metadata["sha256"] = sha256.lower()
-            else:
-                blob_id = _read_value(sibling, "blob_id")
-                if isinstance(blob_id, str) and _HEX_DIGEST_RE.fullmatch(blob_id):
-                    metadata["blob_id"] = blob_id.lower()
-            shards.append(metadata)
-
-        shards.sort(key=lambda item: item["path"])
-        if not shards:
-            raise ValueError("no shards matched the pinned default/train source")
-
-        fingerprint = {
-            "kind": "huggingface_dataset",
-            "dataset_id": DATASET_ID,
-            "revision": REVISION,
-            "config_name": CONFIG_NAME,
-            "split": SPLIT,
-            "shard_count": len(shards),
-            "shards": shards,
-            "license_policy": LICENSE_POLICY,
-        }
-        fingerprint["sha256"] = sha256_bytes(canonical_json_bytes(fingerprint))
-        return fingerprint
+        if load_dataset_fn is not None:
+            return load_dataset_fn(
+                path="parquet",
+                data_files={SPLIT: [str(path) for path in shard_paths]},
+                split=SPLIT,
+                streaming=True,
+            )
+        return _LocalParquetStream(shard_paths)
 
 
 def _read_config(
@@ -222,7 +167,9 @@ def _read_config(
         raise ValueError("incomplete resolved GigaVerbo configuration") from exc
 
     expected_source = {
-        "provider": "huggingface",
+        "provider": "local",
+        "path": "gigaverbo-v2",
+        "format": "parquet",
         "dataset_id": DATASET_ID,
         "revision": REVISION,
         "config_name": CONFIG_NAME,
@@ -234,8 +181,10 @@ def _read_config(
             raise ValueError(f"GigaVerbo source.{key} must be {expected!r}")
 
     shard_glob = source.get("shard_glob")
-    if shard_glob != "data/default/train-*.parquet":
+    if shard_glob != "default/train-*.parquet":
         raise ValueError("GigaVerbo source.shard_glob must select only default/train")
+    if source.get("expected_shards") != 224:
+        raise ValueError("GigaVerbo source.expected_shards must be 224")
     min_score = filters.get("min_edu_int_score")
     if not isinstance(min_score, int) or isinstance(min_score, bool) or min_score != 4:
         raise ValueError("GigaVerbo min_edu_int_score must be 4")
@@ -246,10 +195,10 @@ def _read_config(
             f"GigaVerbo redistribution_status must be {LICENSE_POLICY!r}"
         )
 
-    _positive_integer(selection, "shuffle_buffer_size")
     _positive_integer(selection, "checkpoint_interval")
     _positive_integer(profile, "candidate_documents")
     _positive_integer(profile, "max_source_records")
+    _positive_integer(profile, "shuffle_buffer_size")
     profile_name = config.get("profile_name")
     expected_strategy = {
         "smoke": "engineering_prefix",
@@ -262,6 +211,194 @@ def _read_config(
     if not isinstance(seed, int) or isinstance(seed, bool) or seed < 0:
         raise ValueError("preparation seed must be a non-negative integer")
     return source, filters, selection, profile, seed
+
+
+class _LocalParquetStream:
+    def __init__(
+        self,
+        shard_paths: list[Path],
+        *,
+        seed: int | None = None,
+        buffer_size: int | None = None,
+    ) -> None:
+        self._shard_paths = list(shard_paths)
+        self._seed = seed
+        self._buffer_size = buffer_size
+
+    def shuffle(self, *, seed: int, buffer_size: int) -> "_LocalParquetStream":
+        return _LocalParquetStream(
+            self._shard_paths,
+            seed=seed,
+            buffer_size=buffer_size,
+        )
+
+    def __iter__(self) -> Iterable[dict[str, Any]]:
+        shard_paths = list(self._shard_paths)
+        if self._seed is None or self._buffer_size is None:
+            return _iter_parquet_records(shard_paths)
+
+        shard_seed = int(stable_hash(self._seed, "gigaverbo", "shards"), 16)
+        random.Random(shard_seed).shuffle(shard_paths)
+        records = _iter_parquet_records(shard_paths)
+        buffer_seed = int(stable_hash(self._seed, "gigaverbo", "buffer"), 16)
+        return _buffered_shuffle(
+            records,
+            buffer_size=self._buffer_size,
+            seed=buffer_seed,
+        )
+
+
+def _iter_parquet_records(shard_paths: list[Path]) -> Iterable[dict[str, Any]]:
+    import pyarrow.parquet as pq
+
+    required_columns = {"text", "edu_int_score"}
+    optional_columns = ("source", "subset")
+    for shard_path in shard_paths:
+        try:
+            parquet = pq.ParquetFile(shard_path)
+        except Exception:
+            raise ValueError("GigaVerbo local shard is not readable Parquet") from None
+        available = set(parquet.schema_arrow.names)
+        if not required_columns.issubset(available):
+            raise ValueError("GigaVerbo local shard is missing required columns")
+        columns = ["text", "edu_int_score"] + [
+            column for column in optional_columns if column in available
+        ]
+        try:
+            batches = parquet.iter_batches(
+                batch_size=1024,
+                columns=columns,
+                use_threads=False,
+            )
+            for batch in batches:
+                values = batch.to_pydict()
+                for row_index in range(batch.num_rows):
+                    yield {
+                        column: values[column][row_index] for column in columns
+                    }
+        except Exception:
+            raise ValueError("GigaVerbo local shard could not be streamed") from None
+
+
+def _buffered_shuffle(
+    records: Iterable[dict[str, Any]], *, buffer_size: int, seed: int
+) -> Iterable[dict[str, Any]]:
+    iterator = iter(records)
+    buffer = list(itertools.islice(iterator, buffer_size))
+    generator = random.Random(seed)
+    while buffer:
+        index = generator.randrange(len(buffer))
+        selected = buffer[index]
+        try:
+            buffer[index] = next(iterator)
+        except StopIteration:
+            buffer.pop(index)
+        yield selected
+
+
+def _local_shards(
+    config: dict[str, Any], source: dict[str, Any]
+) -> tuple[Path, list[Path]]:
+    root = resolve_dataset_root(config)
+    relative = Path(source["path"])
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ConfigError("GigaVerbo source.path must stay inside the dataset root")
+
+    unresolved = root / relative
+    if unresolved.is_symlink():
+        raise ConfigError("GigaVerbo source directory must not be a symlink")
+    source_directory = unresolved.resolve()
+    if root != source_directory and root not in source_directory.parents:
+        raise ConfigError("GigaVerbo source.path escapes the dataset root")
+    if not source_directory.is_dir():
+        raise ConfigError("GigaVerbo local source directory was not found")
+
+    data_directory = source_directory / CONFIG_NAME
+    if data_directory.is_symlink() or not data_directory.is_dir():
+        raise ConfigError("GigaVerbo local default directory was not found")
+    shard_paths = []
+    with os.scandir(data_directory) as entries:
+        for entry in entries:
+            relative_path = f"{CONFIG_NAME}/{entry.name}"
+            if not fnmatch.fnmatchcase(relative_path, source["shard_glob"]):
+                continue
+            if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                raise ConfigError("GigaVerbo local shard must be a regular file")
+            shard_paths.append(Path(entry.path))
+    shard_paths.sort()
+    expected_shards = source["expected_shards"]
+    if len(shard_paths) != expected_shards:
+        raise ConfigError(
+            f"GigaVerbo requires exactly {expected_shards} local default/train shards"
+        )
+    return source_directory, shard_paths
+
+
+def _source_fingerprint(
+    source_directory: Path,
+    shard_paths: list[Path],
+    source: dict[str, Any],
+) -> dict[str, Any]:
+    tree_path = (
+        source_directory
+        / ".cache"
+        / "huggingface"
+        / "trees"
+        / f"{REVISION}.json"
+    )
+    if tree_path.is_symlink() or not tree_path.is_file():
+        raise ConfigError("GigaVerbo pinned download tree metadata is missing")
+    try:
+        tree = json.loads(tree_path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ConfigError("GigaVerbo download tree metadata is invalid") from None
+    if not isinstance(tree, dict) or tree.get("format_version") != 1:
+        raise ConfigError("GigaVerbo download tree metadata has an unknown format")
+    files = tree.get("files")
+    if not isinstance(files, dict):
+        raise ConfigError("GigaVerbo download tree metadata has no file listing")
+
+    shards = []
+    for relative_path, metadata in sorted(files.items()):
+        if not isinstance(relative_path, str) or not fnmatch.fnmatchcase(
+            relative_path, source["shard_glob"]
+        ):
+            continue
+        if not isinstance(metadata, dict):
+            raise ConfigError("GigaVerbo download tree contains invalid shard metadata")
+        content_sha256 = metadata.get("lfs_sha256")
+        size = metadata.get("lfs_size")
+        if not isinstance(content_sha256, str) or not _SHA256_RE.fullmatch(
+            content_sha256
+        ):
+            raise ConfigError("GigaVerbo download tree has an invalid shard SHA-256")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 1:
+            raise ConfigError("GigaVerbo download tree has an invalid shard size")
+        shards.append(
+            {
+                "path": relative_path,
+                "size": size,
+                "sha256": content_sha256.lower(),
+            }
+        )
+
+    local_paths = [path.relative_to(source_directory).as_posix() for path in shard_paths]
+    tree_paths = [shard["path"] for shard in shards]
+    if len(shards) != source["expected_shards"] or local_paths != tree_paths:
+        raise ConfigError("GigaVerbo local shards differ from the pinned download tree")
+
+    fingerprint = {
+        "kind": "local_huggingface_snapshot",
+        "dataset_id": DATASET_ID,
+        "revision": REVISION,
+        "config_name": CONFIG_NAME,
+        "split": SPLIT,
+        "shard_count": len(shards),
+        "shards": shards,
+        "license_policy": LICENSE_POLICY,
+    }
+    fingerprint["sha256"] = sha256_bytes(canonical_json_bytes(fingerprint))
+    return fingerprint
 
 
 def _restore_cursor(
@@ -317,21 +454,6 @@ def _safe_record_metadata(record: Mapping[str, Any]) -> dict[str, str]:
         if isinstance(value, str) and _SAFE_LABEL_RE.fullmatch(value):
             metadata[key] = value
     return metadata
-
-
-def _safe_repo_path(path: str) -> bool:
-    parts = path.split("/")
-    return (
-        not path.startswith("/")
-        and "\\" not in path
-        and all(part not in {"", ".", ".."} for part in parts)
-    )
-
-
-def _read_value(value: Any, key: str) -> Any:
-    if isinstance(value, Mapping):
-        return value.get(key)
-    return getattr(value, key, None)
 
 
 def _positive_integer(mapping: Mapping[str, Any], key: str) -> None:

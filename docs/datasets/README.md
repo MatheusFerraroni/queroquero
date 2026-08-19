@@ -10,7 +10,7 @@ não incluem textos, usernames, IDs pessoais ou URLs dos registros.
 | [BrWaC-CLEAN](brwac.md) | `BrWac.zip` → `data/*.txt` | 3.063.728 textos | seleção determinística no ZIP |
 | [MultiWOZ-PTBR](multiwoz-ptbr.md) | 17 JSONs | 8.437 diálogos | utterances em ordem |
 | [WackyWacky](wackywacky.md) | `pages.tsv` | 56,2 GB; linhas desconhecidas | streaming TSV e gate de boilerplate |
-| [GigaVerbo-v2](gigaverbo.md) | `default/train` remoto | 372.108.576 linhas | streaming pinado e limitado |
+| [GigaVerbo-v2](gigaverbo.md) | `gigaverbo-v2/default/train-*.parquet` local | 372.108.576 linhas | streaming pinado e limitado |
 
 `forum.*.zip`, `messages.zip` e `names.tsv` não são texto de treino.
 `conversations_min.zip` é usado somente pelo perfil `smoke` dos adapters de

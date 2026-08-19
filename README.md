@@ -44,7 +44,7 @@ descartada e contabilizada.
 | `multiwoz_ptbr` | [MultiWOZ-PTBR](docs/datasets/multiwoz-ptbr.md) | 17 arquivos `dialogues_*.json` |
 | `outerspace` | [OuterSpace](docs/datasets/outerspace.md) | `conversations*.zip` |
 | `adrenaline` | [Adrenaline](docs/datasets/adrenaline.md) | `conversations*.zip` |
-| `gigaverbo` | [GigaVerbo-v2](docs/datasets/gigaverbo.md) | `default/train` remoto e pinado |
+| `gigaverbo` | [GigaVerbo-v2](docs/datasets/gigaverbo.md) | `gigaverbo-v2/default/train-*.parquet` local e pinado |
 
 Os limites e regras de cada fonte ficam em `configs/datasets/`; as regras
 comuns ficam em `configs/preparation.json`.
@@ -58,7 +58,7 @@ uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -r requirements.txt
 ```
 
-A preparação não depende de PyTorch. Para as cinco fontes locais, copie o
+A preparação não depende de PyTorch. Para as seis fontes locais, copie o
 arquivo de ambiente e ajuste a raiz somente leitura uma vez:
 
 ```sh
@@ -73,7 +73,10 @@ local e ignorado pelo Git.
 Todos os comandos Python deste projeto passam explicitamente por `uv` e pelo
 interpretador `.venv/bin/python`; não use o Python do sistema.
 
-GigaVerbo é lido por streaming e requer acesso à Hugging Face.
+GigaVerbo é lido por streaming diretamente dos 224 Parquets locais. A cópia
+deve preservar o índice `.cache/huggingface/trees/<revisão>.json` criado pelo
+download, usado para confirmar a lista, os tamanhos e os hashes sem reler
+centenas de gigabytes.
 
 ## Executar
 

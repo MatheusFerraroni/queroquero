@@ -7,6 +7,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Sequence, Tuple
 
+import zstandard as zstd
+
 from queroquero.config import ConfigError, resolve_dataset_root
 from queroquero.datasets.base import (
     CheckpointCallback,
@@ -39,6 +41,8 @@ _EXPECTED_COLUMNS = (
     "updated_at",
 )
 _PARAGRAPH_BREAK_RE = re.compile(r"\n\s*\n+")
+_MD5_RE = re.compile(r"[0-9a-fA-F]{32}\Z")
+_ZSTD_DECOMPRESSOR = zstd.ZstdDecompressor()
 
 
 class WackyWackyAdapter:
@@ -68,6 +72,10 @@ class WackyWackyAdapter:
         max_field_size = _positive_int(
             source.get("max_field_size_bytes", 128 * 1024 * 1024),
             "source.max_field_size_bytes",
+        )
+        max_decompressed_text_bytes = _positive_int(
+            source.get("max_decompressed_text_bytes"),
+            "source.max_decompressed_text_bytes",
         )
         sample_bytes = _positive_int(
             source.get("fingerprint_sample_bytes", 64 * 1024),
@@ -162,6 +170,7 @@ class WackyWackyAdapter:
                         filters=filters,
                         seed=seed,
                         metrics=metrics,
+                        maximum_text_bytes=max_decompressed_text_bytes,
                     )
                     if document is not None:
                         metrics["eligible_records"] += 1
@@ -304,11 +313,27 @@ def _validate_config(
         raise ConfigError("WackyWacky source.format must be 'tsv'")
     if source.get("encoding") != "utf-8":
         raise ConfigError("WackyWacky source.encoding must be 'utf-8'")
+    if source.get("text_encoding") != "hex-zstd-utf8":
+        raise ConfigError(
+            "WackyWacky source.text_encoding must be 'hex-zstd-utf8'"
+        )
+    _positive_int(
+        source.get("max_decompressed_text_bytes"),
+        "source.max_decompressed_text_bytes",
+    )
     if filters.get("status") != "done":
         raise ConfigError("WackyWacky filters.status must be 'done'")
     for name in ("require_text", "require_text_md5", "exclude_same_as"):
         if filters.get(name) is not True:
             raise ConfigError(f"WackyWacky filters.{name} must be true")
+    if filters.get("text_md5_policy") != "count_mismatch":
+        raise ConfigError(
+            "WackyWacky filters.text_md5_policy must be 'count_mismatch'"
+        )
+    if filters.get("same_as_null_values") != ["", "NULL"]:
+        raise ConfigError(
+            "WackyWacky filters.same_as_null_values must be ['', 'NULL']"
+        )
     profile_name = config.get("profile_name")
     selection = config["profile"].get("selection")
     expected_selection = {
@@ -384,6 +409,7 @@ def _eligible_document(
     filters: Dict[str, Any],
     seed: int,
     metrics: Dict[str, int],
+    maximum_text_bytes: int,
 ) -> Optional[Document]:
     if record["status"].strip() != filters.get("status", "done"):
         metrics["filtered_status"] += 1
@@ -396,9 +422,19 @@ def _eligible_document(
     if filters.get("require_text_md5", True) and not text_md5:
         metrics["filtered_missing_text_md5"] += 1
         return None
-    if filters.get("exclude_same_as", True) and record["same_as"].strip():
+    same_as = record["same_as"].strip()
+    same_as_null_values = filters.get("same_as_null_values", [""])
+    if filters.get("exclude_same_as", True) and same_as not in same_as_null_values:
         metrics["filtered_same_as"] += 1
         return None
+
+    text, text_md5_matches = _decode_text(
+        text,
+        text_md5,
+        maximum_bytes=maximum_text_bytes,
+    )
+    if not text_md5_matches:
+        metrics["text_md5_mismatches"] += 1
 
     record_key = stable_hash(
         "wackywacky",
@@ -426,6 +462,46 @@ def _eligible_document(
             "selection_score": score,
         },
     )
+
+
+def _decode_text(encoded: str, text_md5: str, maximum_bytes: int) -> tuple[str, bool]:
+    if not _MD5_RE.fullmatch(text_md5):
+        raise ValueError("WackyWacky text_md5 is not a valid MD5 digest")
+    try:
+        compressed = bytes.fromhex(encoded)
+    except ValueError:
+        raise ValueError("WackyWacky text is not valid hexadecimal") from None
+    if not compressed:
+        raise ValueError("WackyWacky text contains an empty compressed payload")
+    try:
+        declared_size = zstd.frame_content_size(compressed)
+    except zstd.ZstdError:
+        raise ValueError("WackyWacky text is not a valid Zstandard frame") from None
+    if declared_size == zstd.CONTENTSIZE_ERROR:
+        raise ValueError("WackyWacky text is not a valid Zstandard frame")
+    if (
+        declared_size != zstd.CONTENTSIZE_UNKNOWN
+        and declared_size > maximum_bytes
+    ):
+        raise ValueError("WackyWacky decompressed text exceeds the size limit")
+    try:
+        decoded_bytes = _ZSTD_DECOMPRESSOR.decompress(
+            compressed,
+            max_output_size=maximum_bytes,
+        )
+    except zstd.ZstdError:
+        raise ValueError("WackyWacky text is not a valid Zstandard frame") from None
+    if len(decoded_bytes) > maximum_bytes:
+        raise ValueError("WackyWacky decompressed text exceeds the size limit")
+    text_md5_matches = (
+        hashlib.md5(decoded_bytes, usedforsecurity=False).hexdigest()
+        == text_md5.lower()
+    )
+    try:
+        decoded = decoded_bytes.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        raise ValueError("WackyWacky decompressed text is not strict UTF-8") from None
+    return decoded, text_md5_matches
 
 
 def _resume_reservoir(
@@ -743,6 +819,7 @@ def _resume_metrics(value: Any) -> Dict[str, int]:
         "filtered_missing_text": 0,
         "filtered_missing_text_md5": 0,
         "filtered_same_as": 0,
+        "text_md5_mismatches": 0,
         "selected_documents": 0,
     }
     if value is None:

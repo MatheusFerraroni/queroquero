@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import shutil
@@ -9,6 +10,8 @@ import unittest
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
+
+import zstandard as zstd
 
 from queroquero.config import ConfigError
 from queroquero.datasets.wackywacky import (
@@ -34,6 +37,8 @@ def resolved_config(
                 "path": "wacky/pages.tsv",
                 "format": "tsv",
                 "encoding": "utf-8",
+                "text_encoding": "hex-zstd-utf8",
+                "max_decompressed_text_bytes": 1024 * 1024,
                 "columns": list(_EXPECTED_COLUMNS),
                 "max_field_size_bytes": 1024 * 1024,
                 "checkpoint_interval_records": checkpoint_interval,
@@ -43,7 +48,9 @@ def resolved_config(
                 "status": "done",
                 "require_text": True,
                 "require_text_md5": True,
+                "text_md5_policy": "count_mismatch",
                 "exclude_same_as": True,
+                "same_as_null_values": ["", "NULL"],
                 "boilerplate": {
                     "decision": decision,
                     "minimum_paragraph_characters": 80,
@@ -70,6 +77,13 @@ def record(
     text_md5: str | None = None,
     same_as: str = "",
 ) -> dict[str, str]:
+    raw_text = text.encode("utf-8")
+    encoded_text = (
+        zstd.ZstdCompressor(level=1).compress(raw_text).hex().upper()
+        if raw_text
+        else ""
+    )
+    default_md5 = hashlib.md5(raw_text, usedforsecurity=False).hexdigest()
     value = {column: "" for column in _EXPECTED_COLUMNS}
     value.update(
         {
@@ -78,8 +92,8 @@ def record(
             "same_as": same_as,
             "url_md5": f"url-digest-{index}",
             "status": status,
-            "text": text,
-            "text_md5": text_md5 if text_md5 is not None else f"text-digest-{index}",
+            "text": encoded_text,
+            "text_md5": text_md5 if text_md5 is not None else default_md5,
         }
     )
     return value
@@ -118,7 +132,7 @@ class WackyWackyAdapterTests(unittest.TestCase):
                 record(2, "", text_md5="present"),
                 record(3, "sem hash", text_md5=""),
                 record(4, "duplicado", same_as="canonical-record"),
-                record(5, "Texto elegível A"),
+                record(5, "Texto elegível A", same_as="NULL"),
                 record(6, '"Texto elegível B" seguido'),
                 record(7, "Não deve ser lido"),
             ],
@@ -142,6 +156,48 @@ class WackyWackyAdapterTests(unittest.TestCase):
         for document in result.documents:
             self.assertNotIn("private-record", document.source_ref)
             self.assertNotIn("domain-a", repr(document.metadata))
+
+    def test_rejects_invalid_hexadecimal_zstd_utf8_and_md5(self) -> None:
+        invalid_hex = record(1, "Texto")
+        invalid_hex["text"] = "não-hexadecimal"
+        write_tsv(self.source, [invalid_hex])
+        with self.assertRaisesRegex(ValueError, "not valid hexadecimal"):
+            WackyWackyAdapter().scan(resolved_config(candidate_documents=1))
+
+        invalid_zstd = record(2, "Texto")
+        invalid_zstd["text"] = b"not-zstd".hex()
+        write_tsv(self.source, [invalid_zstd])
+        with self.assertRaisesRegex(ValueError, "not a valid Zstandard frame"):
+            WackyWackyAdapter().scan(resolved_config(candidate_documents=1))
+
+        invalid_utf8_bytes = b"\xff"
+        invalid_utf8 = record(3, "Texto")
+        invalid_utf8["text"] = (
+            zstd.ZstdCompressor(level=1)
+            .compress(invalid_utf8_bytes)
+            .hex()
+        )
+        invalid_utf8["text_md5"] = hashlib.md5(
+            invalid_utf8_bytes, usedforsecurity=False
+        ).hexdigest()
+        write_tsv(self.source, [invalid_utf8])
+        with self.assertRaisesRegex(ValueError, "not strict UTF-8"):
+            WackyWackyAdapter().scan(resolved_config(candidate_documents=1))
+
+        mismatched_md5 = record(4, "Texto")
+        mismatched_md5["text_md5"] = "0" * 32
+        write_tsv(self.source, [mismatched_md5])
+        result = WackyWackyAdapter().scan(resolved_config(candidate_documents=1))
+        self.assertEqual([document.text for document in result.documents], ["Texto"])
+        self.assertEqual(result.metrics["text_md5_mismatches"], 1)
+
+    def test_rejects_decompressed_text_above_configured_limit(self) -> None:
+        write_tsv(self.source, [record(1, "A" * 1024)])
+        config = resolved_config(candidate_documents=1)
+        config["dataset"]["source"]["max_decompressed_text_bytes"] = 128
+
+        with self.assertRaisesRegex(ValueError, "exceeds the size limit"):
+            WackyWackyAdapter().scan(config)
 
     def test_mvp_scans_the_full_source_and_pending_blocks_finalization(self) -> None:
         rows = [record(index, f"Documento sintético {index}") for index in range(12)]
