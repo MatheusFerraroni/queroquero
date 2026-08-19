@@ -103,11 +103,13 @@ class ConfigTest(unittest.TestCase):
     def test_only_wacky_post_scan_decision_reuses_the_scan_cache(self) -> None:
         pending, _ = load_resolved_config("wackywacky", "mvp")
         keep = deepcopy(pending)
-        keep["dataset"]["filters"]["boilerplate"]["decision"] = "keep"
+        keep["dataset"]["filters"]["boilerplate"]["decision_by_profile"][
+            "mvp"
+        ] = "keep"
         changed_threshold = deepcopy(keep)
         changed_threshold["dataset"]["filters"]["boilerplate"][
-            "minimum_documents"
-        ] = 6
+            "within_domain_blocks"
+        ]["minimum_documents"] = 6
 
         self.assertEqual(scan_config_sha256(pending), scan_config_sha256(keep))
         self.assertNotEqual(

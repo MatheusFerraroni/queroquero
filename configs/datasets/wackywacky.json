@@ -41,11 +41,53 @@
     "text_md5_policy": "count_mismatch",
     "exclude_same_as": true,
     "same_as_null_values": ["", "NULL"],
+    "page_filter": {
+      "search_title_markers": [
+        "resultados da pesquisa",
+        "resultados de pesquisa",
+        "resultados da busca",
+        "resultados de busca",
+        "search results"
+      ],
+      "search_query_parameters": ["search"],
+      "search_query_value_markers": ["especial:pesquisar", "special:search"],
+      "search_path_segments": ["search", "busca", "buscar", "pesquisa", "pesquisar"],
+      "listing_path_segments": [
+        "tag",
+        "tags",
+        "category",
+        "categories",
+        "categoria",
+        "categorias",
+        "archive",
+        "archives",
+        "arquivo",
+        "arquivos"
+      ]
+    },
+    "line_filter": {
+      "minimum_characters": 40
+    },
     "boilerplate": {
-      "decision": "pending",
-      "minimum_paragraph_characters": 80,
-      "minimum_documents": 5,
-      "minimum_domains": 3
+      "schema_version": 4,
+      "decision_by_profile": {
+        "smoke": "remove_exact",
+        "mvp": "pending"
+      },
+      "cross_domain_paragraphs": {
+        "minimum_characters": 80,
+        "minimum_documents": 5,
+        "minimum_domains": 3
+      },
+      "within_domain_blocks": {
+        "lines_per_block": 3,
+        "minimum_characters": 60,
+        "minimum_documents": 5
+      },
+      "document_filter": {
+        "minimum_remaining_characters": 300,
+        "maximum_removed_fraction": 0.8
+      }
     }
   },
   "profiles": {

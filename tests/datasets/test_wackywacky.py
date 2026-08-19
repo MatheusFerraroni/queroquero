@@ -25,8 +25,9 @@ def resolved_config(
     *,
     profile_name: str = "smoke",
     candidate_documents: int = 3,
-    decision: str = "pending",
+    decision: str | None = None,
     checkpoint_interval: int = 100,
+    minimum_line_characters: int = 1,
 ) -> dict[str, Any]:
     return {
         "profile_name": profile_name,
@@ -51,11 +52,62 @@ def resolved_config(
                 "text_md5_policy": "count_mismatch",
                 "exclude_same_as": True,
                 "same_as_null_values": ["", "NULL"],
+                "page_filter": {
+                    "search_title_markers": [
+                        "resultados da pesquisa",
+                        "resultados de pesquisa",
+                        "resultados da busca",
+                        "resultados de busca",
+                        "search results",
+                    ],
+                    "search_query_parameters": ["search"],
+                    "search_query_value_markers": [
+                        "especial:pesquisar",
+                        "special:search",
+                    ],
+                    "search_path_segments": [
+                        "search",
+                        "busca",
+                        "buscar",
+                        "pesquisa",
+                        "pesquisar",
+                    ],
+                    "listing_path_segments": [
+                        "tag",
+                        "tags",
+                        "category",
+                        "categories",
+                        "categoria",
+                        "categorias",
+                        "archive",
+                        "archives",
+                        "arquivo",
+                        "arquivos",
+                    ],
+                },
+                "line_filter": {
+                    "minimum_characters": minimum_line_characters,
+                },
                 "boilerplate": {
-                    "decision": decision,
-                    "minimum_paragraph_characters": 80,
-                    "minimum_documents": 5,
-                    "minimum_domains": 3,
+                    "schema_version": 4,
+                    "decision_by_profile": {
+                        "smoke": "remove_exact",
+                        "mvp": decision or "pending",
+                    },
+                    "cross_domain_paragraphs": {
+                        "minimum_characters": 80,
+                        "minimum_documents": 5,
+                        "minimum_domains": 3,
+                    },
+                    "within_domain_blocks": {
+                        "lines_per_block": 3,
+                        "minimum_characters": 60,
+                        "minimum_documents": 5,
+                    },
+                    "document_filter": {
+                        "minimum_remaining_characters": 300,
+                        "maximum_removed_fraction": 0.8,
+                    },
                 },
             },
         },
@@ -76,6 +128,9 @@ def record(
     status: str = "done",
     text_md5: str | None = None,
     same_as: str = "",
+    title: str = "",
+    url: str = "",
+    url_final: str = "",
 ) -> dict[str, str]:
     raw_text = text.encode("utf-8")
     encoded_text = (
@@ -90,6 +145,9 @@ def record(
             "id": f"private-record-{index}",
             "domain_id": domain,
             "same_as": same_as,
+            "title": title,
+            "url": url,
+            "url_final": url_final,
             "url_md5": f"url-digest-{index}",
             "status": status,
             "text": encoded_text,
@@ -152,7 +210,10 @@ class WackyWackyAdapterTests(unittest.TestCase):
         self.assertEqual(result.metrics["filtered_missing_text_md5"], 1)
         self.assertEqual(result.metrics["filtered_same_as"], 1)
         self.assertFalse(result.source_fingerprint["complete_source_scan"])
-        self.assertEqual(result.extra_reports, {})
+        report = result.extra_reports["boilerplate_report"]
+        self.assertEqual(report["schema_version"], "queroquero-boilerplate-report/v2")
+        self.assertEqual(report["decision"], "remove_exact")
+        self.assertFalse(report["finalization_blocked"])
         for document in result.documents:
             self.assertNotIn("private-record", document.source_ref)
             self.assertNotIn("domain-a", repr(document.metadata))
@@ -198,6 +259,56 @@ class WackyWackyAdapterTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "exceeds the size limit"):
             WackyWackyAdapter().scan(config)
+
+    def test_filters_search_and_listing_pages_without_exposing_page_values(self) -> None:
+        rows = [
+            record(
+                1,
+                "conteúdo de busca que não deve ser selecionado",
+                title="Resultados da pesquisa sintética",
+            ),
+            record(
+                2,
+                "conteúdo de listagem que não deve ser selecionado",
+                url="https://example.invalid/category/synthetic-topic",
+            ),
+            record(
+                3,
+                "outro conteúdo de busca que não deve ser selecionado",
+                url_final=(
+                    "https://example.invalid/index.php?search=synthetic"
+                    "&title=Especial%3APesquisar"
+                ),
+            ),
+            record(
+                4,
+                "Texto editorial sintético preservado",
+                title="Estudo sobre resultados da pesquisa sintética",
+                url="https://example.invalid/articles/synthetic-topic",
+            ),
+        ]
+        write_tsv(self.source, rows)
+
+        result = WackyWackyAdapter().scan(
+            resolved_config(candidate_documents=1)
+        )
+
+        self.assertEqual(
+            [document.text for document in result.documents],
+            ["Texto editorial sintético preservado"],
+        )
+        self.assertEqual(result.metrics["filtered_page_search"], 2)
+        self.assertEqual(result.metrics["filtered_page_listing"], 1)
+        serialized = json.dumps(
+            {
+                "metrics": result.metrics,
+                "cursor": result.cursor,
+                "report": result.extra_reports,
+            },
+            ensure_ascii=False,
+        )
+        self.assertNotIn("example.invalid", serialized)
+        self.assertNotIn("Resultados da pesquisa sintética", serialized)
 
     def test_mvp_scans_the_full_source_and_pending_blocks_finalization(self) -> None:
         rows = [record(index, f"Documento sintético {index}") for index in range(12)]
@@ -249,7 +360,7 @@ class WackyWackyAdapterTests(unittest.TestCase):
         rows = [
             record(
                 index,
-                f"<p>{repeated}</p><p>final-{index}</p>",
+                f"<p>{repeated}</p><p>final-{index}-{'C' * 320}</p>",
                 domain=f"domain-{index % 3}",
             )
             for index in range(6)
@@ -265,7 +376,9 @@ class WackyWackyAdapterTests(unittest.TestCase):
         )
         self.assertFalse(kept.cursor["finalization_blocked"])
         self.assertEqual(
-            kept.extra_reports["boilerplate_report"]["repeated_paragraph_hashes"],
+            kept.extra_reports["boilerplate_report"]["analysis"][
+                "cross_domain_paragraphs_repeated"
+            ],
             1,
         )
         self.assertTrue(all(repeated in document.text for document in kept.documents))
@@ -279,8 +392,10 @@ class WackyWackyAdapterTests(unittest.TestCase):
         )
         report = removed.extra_reports["boilerplate_report"]
         self.assertFalse(removed.cursor["finalization_blocked"])
-        self.assertEqual(report["affected_documents"], 6)
-        self.assertEqual(report["removed_paragraph_occurrences"], 6)
+        self.assertEqual(report["simulation"]["affected_documents"], 6)
+        self.assertEqual(
+            report["analysis"]["matching_cross_domain_paragraph_occurrences"], 6
+        )
         self.assertEqual(len(removed.documents), 6)
         self.assertTrue(
             all(document.text.startswith("final-") for document in removed.documents)
@@ -298,12 +413,193 @@ class WackyWackyAdapterTests(unittest.TestCase):
         self.assertEqual(resumed.documents, removed.documents)
         self.assertEqual(resumed.extra_reports, removed.extra_reports)
 
+    def test_smoke_removes_three_line_blocks_repeated_within_one_domain(self) -> None:
+        menu_lines = (
+            "Navegação principal do portal sintético",
+            "Serviços e informações institucionais sintéticas",
+            "Atendimento e canais oficiais sintéticos",
+        )
+        menu = "\n".join(menu_lines)
+        rows = [
+            record(
+                index,
+                f"cabeçalho-{index}-{'A' * 320}\n\n{menu}\n\nrodapé-{index}-{'B' * 320}",
+                domain="synthetic-domain",
+            )
+            for index in range(5)
+        ]
+        write_tsv(self.source, rows)
+
+        result = WackyWackyAdapter().scan(
+            resolved_config(candidate_documents=len(rows))
+        )
+
+        report = result.extra_reports["boilerplate_report"]
+        self.assertEqual(report["profile"], "smoke")
+        self.assertEqual(report["decision"], "remove_exact")
+        self.assertFalse(report["finalization_blocked"])
+        self.assertEqual(report["analysis"]["within_domain_blocks_repeated"], 1)
+        self.assertEqual(report["simulation"]["affected_documents"], 5)
+        self.assertEqual(report["applied"], report["simulation"])
+        self.assertEqual(len(result.documents), 5)
+        self.assertTrue(all(menu not in document.text for document in result.documents))
+        serialized = json.dumps(report, ensure_ascii=False)
+        self.assertNotIn(menu_lines[0], serialized)
+        self.assertNotIn("synthetic-domain", serialized)
+
+    def test_within_domain_block_stays_below_distinct_document_threshold(self) -> None:
+        menu = "\n".join(
+            (
+                "Primeira linha suficientemente longa do menu sintético",
+                "Segunda linha suficientemente longa do menu sintético",
+                "Terceira linha suficientemente longa do menu sintético",
+            )
+        )
+        rows = [
+            record(
+                index,
+                (
+                    f"conteúdo-{index}-{'A' * 320}\n\n{menu}"
+                    + (f"\n\n{menu}" if index == 0 else "")
+                ),
+                domain="synthetic-domain",
+            )
+            for index in range(4)
+        ]
+        write_tsv(self.source, rows)
+
+        result = WackyWackyAdapter().scan(
+            resolved_config(candidate_documents=len(rows))
+        )
+
+        report = result.extra_reports["boilerplate_report"]
+        self.assertEqual(report["analysis"]["within_domain_blocks_repeated"], 0)
+        self.assertEqual(report["simulation"]["affected_documents"], 0)
+        self.assertTrue(all(menu in document.text for document in result.documents))
+
+    def test_overlapping_blocks_are_removed_once_and_order_is_preserved(self) -> None:
+        common_lines = tuple(
+            f"linha-{index}-{'M' * 60}" for index in range(4)
+        )
+        common = "\n".join(common_lines)
+        rows = [
+            record(
+                index,
+                f"antes-{index}-{'A' * 320}\n\n{common}\n\ndepois-{index}-{'B' * 320}",
+                domain="synthetic-domain",
+            )
+            for index in range(5)
+        ]
+        write_tsv(self.source, rows)
+
+        result = WackyWackyAdapter().scan(
+            resolved_config(candidate_documents=len(rows))
+        )
+
+        report = result.extra_reports["boilerplate_report"]
+        self.assertEqual(report["analysis"]["within_domain_blocks_repeated"], 2)
+        self.assertEqual(
+            report["analysis"]["matching_within_domain_block_occurrences"], 10
+        )
+        self.assertEqual(
+            report["applied"]["removed_characters"],
+            len(rows) * (len(common) + 2),
+        )
+        for index, document in enumerate(result.documents):
+            self.assertEqual(
+                document.text,
+                f"antes-{index}-{'A' * 320}\n\ndepois-{index}-{'B' * 320}",
+            )
+
+    def test_global_line_filter_removes_each_normalized_line_below_40(self) -> None:
+        original_lines = [
+            "A" * 39,
+            "B" * 40,
+            "C" * 41,
+            "título sintético curto",
+            "D" * 300,
+        ]
+        write_tsv(self.source, [record(1, "\n".join(original_lines))])
+
+        result = WackyWackyAdapter().scan(
+            resolved_config(
+                candidate_documents=1,
+                minimum_line_characters=40,
+            )
+        )
+
+        expected_lines = ["B" * 40, "C" * 41, "D" * 300]
+        self.assertEqual(
+            [document.text for document in result.documents],
+            ["\n".join(expected_lines)],
+        )
+        self.assertTrue(
+            all(
+                len(line) >= 40
+                for line in result.documents[0].text.splitlines()
+                if line
+            )
+        )
+        line_filter = result.extra_reports["boilerplate_report"]["line_filter"]
+        self.assertEqual(line_filter["minimum_characters"], 40)
+        self.assertEqual(line_filter["lines_considered"], 5)
+        self.assertEqual(line_filter["lines_removed"], 2)
+        self.assertEqual(line_filter["documents_remaining"], 1)
+
+    def test_remove_exact_discards_short_and_over_removed_documents(self) -> None:
+        short_block = "\n".join(
+            (
+                "linha curta repetida com tamanho suficiente um",
+                "linha curta repetida com tamanho suficiente dois",
+                "linha curta repetida com tamanho suficiente três",
+            )
+        )
+        large_block = "\n".join(
+            (
+                "X" * 520,
+                "Y" * 520,
+                "Z" * 520,
+            )
+        )
+        rows = [
+            record(
+                index,
+                f"{short_block}\n\nrestante-{index}-{'A' * 240}",
+                domain="short-domain",
+            )
+            for index in range(5)
+        ]
+        rows.extend(
+            record(
+                index + 5,
+                f"{large_block}\n\nrestante-{index}-{'B' * 340}",
+                domain="fraction-domain",
+            )
+            for index in range(5)
+        )
+        write_tsv(self.source, rows)
+
+        result = WackyWackyAdapter().scan(
+            resolved_config(candidate_documents=len(rows))
+        )
+
+        applied = result.extra_reports["boilerplate_report"]["applied"]
+        self.assertEqual(
+            applied["documents_discarded_minimum_remaining_characters"], 5
+        )
+        self.assertEqual(
+            applied["documents_discarded_maximum_removed_fraction"], 5
+        )
+        self.assertEqual(applied["documents_discarded_total"], 10)
+        self.assertEqual(applied["documents_remaining"], 0)
+        self.assertEqual(result.documents, [])
+
     def test_pending_candidates_can_be_reused_after_review(self) -> None:
         repeated = "B" * 90
         rows = [
             record(
                 index,
-                f"<p>{repeated}</p><p>conteúdo-{index}</p>",
+                f"<p>{repeated}</p><p>conteúdo-{index}-{'C' * 320}</p>",
                 domain=f"domain-{index % 3}",
             )
             for index in range(6)
@@ -329,8 +625,8 @@ class WackyWackyAdapterTests(unittest.TestCase):
 
         self.assertFalse(reviewed.cursor["finalization_blocked"])
         self.assertEqual(
-            reviewed.extra_reports["boilerplate_report"][
-                "removed_paragraph_occurrences"
+            reviewed.extra_reports["boilerplate_report"]["analysis"][
+                "matching_cross_domain_paragraph_occurrences"
             ],
             6,
         )

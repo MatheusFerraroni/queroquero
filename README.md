@@ -172,16 +172,29 @@ commits ou documentação.
 
 ## Revisão de boilerplate do WackyWacky
 
-No perfil `mvp`, `filters.boilerplate.decision` começa como `pending`. A passagem
-produz `boilerplate_report.json`, encerra com status de revisão e não publica
-shards finais. Após revisar apenas as contagens do relatório, configure uma
-decisão explícita:
+O perfil `smoke` usa `remove_exact` automaticamente e grava
+`boilerplate_report.json` sem interromper a execução. No perfil `mvp`,
+`filters.boilerplate.decision_by_profile.mvp` começa como `pending`: a passagem
+produz o mesmo relatório agregado, encerra com status de revisão e não publica
+shards finais. Após revisar suas contagens, configure uma decisão explícita:
 
-- `keep`: mantém os parágrafos medidos;
-- `remove_exact`: remove parágrafos normalizados com pelo menos 80 caracteres,
-  repetidos em pelo menos 5 documentos e 3 domínios.
+- `keep`: mantém o texto dos candidatos;
+- `remove_exact`: remove parágrafos exatos com pelo menos 80 caracteres,
+  repetidos em 5 documentos e 3 domínios, e janelas exatas de 3 linhas com ao
+  menos 60 caracteres, repetidas em 5 documentos do mesmo domínio.
 
-O relatório não contém exemplos ou conteúdo da fonte.
+Depois da normalização, o WackyWacky remove globalmente cada linha não vazia
+com menos de 40 caracteres, inclusive quando um documento contém várias
+quebras de linha. Páginas identificadas como busca, categoria, tag ou arquivo
+são descartadas antes da descompactação usando somente título e URL em memória.
+
+Depois dos filtros, documentos afetados são descartados quando restam menos de
+300 caracteres ou quando mais de 80% do texto normalizado foi removido. A troca
+de `pending` para uma decisão final reutiliza os candidatos do scan completo;
+alterar qualquer limiar inicia um novo scan.
+
+O relatório v2 e as métricas desses filtros não contêm exemplos, URLs, títulos,
+hashes de blocos ou conteúdo da fonte.
 
 ## Segurança e proveniência
 

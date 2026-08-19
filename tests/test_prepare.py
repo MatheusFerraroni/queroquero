@@ -70,10 +70,14 @@ class BlockedAdapter:
     def scan(self, config, resume_cursor=None, resume_documents=None, checkpoint=None):
         del config, resume_cursor, resume_documents, checkpoint
         report = {
-            "schema_version": "queroquero-boilerplate-report/v1",
+            "schema_version": "queroquero-boilerplate-report/v2",
+            "profile": "mvp",
             "decision": "pending",
             "contains_examples": False,
             "candidate_documents": 0,
+            "analysis": {},
+            "simulation": {},
+            "applied": {},
             "finalization_blocked": True,
         }
         return ScanResult(
@@ -110,11 +114,57 @@ def resolved_config(dataset_id: str = "brwac", profile: str = "smoke"):
     filters = {"min_characters": 1}
     if dataset_id == "wackywacky":
         filters["boilerplate"] = {
-            "decision": "pending",
-            "minimum_paragraph_characters": 80,
-            "minimum_documents": 5,
-            "minimum_domains": 3,
+            "schema_version": 4,
+            "decision_by_profile": {"smoke": "remove_exact", "mvp": "pending"},
+            "cross_domain_paragraphs": {
+                "minimum_characters": 80,
+                "minimum_documents": 5,
+                "minimum_domains": 3,
+            },
+            "within_domain_blocks": {
+                "lines_per_block": 3,
+                "minimum_characters": 60,
+                "minimum_documents": 5,
+            },
+            "document_filter": {
+                "minimum_remaining_characters": 300,
+                "maximum_removed_fraction": 0.8,
+            },
         }
+        filters["page_filter"] = {
+            "search_title_markers": [
+                "resultados da pesquisa",
+                "resultados de pesquisa",
+                "resultados da busca",
+                "resultados de busca",
+                "search results",
+            ],
+            "search_query_parameters": ["search"],
+            "search_query_value_markers": [
+                "especial:pesquisar",
+                "special:search",
+            ],
+            "search_path_segments": [
+                "search",
+                "busca",
+                "buscar",
+                "pesquisa",
+                "pesquisar",
+            ],
+            "listing_path_segments": [
+                "tag",
+                "tags",
+                "category",
+                "categories",
+                "categoria",
+                "categorias",
+                "archive",
+                "archives",
+                "arquivo",
+                "arquivos",
+            ],
+        }
+        filters["line_filter"] = {"minimum_characters": 40}
     result = {
         "schema_version": "queroquero-resolved-preparation/v1",
         "dataset_id": dataset_id,

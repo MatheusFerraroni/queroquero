@@ -102,8 +102,14 @@ def scan_config_sha256(resolved: Dict[str, Any]) -> str:
         boilerplate = (
             scan_config.get("dataset", {}).get("filters", {}).get("boilerplate")
         )
-        if isinstance(boilerplate, dict) and "decision" in boilerplate:
-            boilerplate["decision"] = "post_scan_review"
+        decisions = (
+            boilerplate.get("decision_by_profile")
+            if isinstance(boilerplate, dict)
+            else None
+        )
+        if isinstance(decisions, dict):
+            for profile_name in decisions:
+                decisions[profile_name] = "post_scan_review"
     return sha256_bytes(canonical_json_bytes(scan_config))
 
 

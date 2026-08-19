@@ -3,9 +3,10 @@ from __future__ import annotations
 import hashlib
 import heapq
 import re
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Sequence, Tuple
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 import zstandard as zstd
 
@@ -45,6 +46,32 @@ _MD5_RE = re.compile(r"[0-9a-fA-F]{32}\Z")
 _ZSTD_DECOMPRESSOR = zstd.ZstdDecompressor()
 
 
+@dataclass(frozen=True)
+class _NormalizedParagraph:
+    lines: Tuple[str, ...]
+    text: str
+    sha256: str
+
+
+@dataclass(frozen=True)
+class _NormalizedDocument:
+    paragraphs: Tuple[_NormalizedParagraph, ...]
+    text: str
+
+
+@dataclass(frozen=True)
+class _BoilerplateAnalysis:
+    normalized_documents: Dict[str, _NormalizedDocument]
+    repeated_cross_domain_paragraphs: set[str]
+    repeated_within_domain_blocks: set[Tuple[str, str]]
+    paragraph_occurrences_considered: int
+    distinct_paragraph_hashes: int
+    matching_paragraph_occurrences: int
+    block_occurrences_considered: int
+    distinct_domain_block_hashes: int
+    matching_block_occurrences: int
+
+
 class WackyWackyAdapter:
     """Stream the 19-column WackyWacky TSV without exposing source values."""
 
@@ -59,6 +86,8 @@ class WackyWackyAdapter:
         filters = config["dataset"]["filters"]
         profile = config["profile"]
         _validate_config(config, source, filters)
+        page_filter_rules = _page_filter_rules(filters)
+        minimum_line_characters = _line_filter_minimum(filters)
         path = _source_path(config)
         columns = _configured_columns(source)
         header_end = _validate_header(path, columns)
@@ -168,6 +197,7 @@ class WackyWackyAdapter:
                         row_number=row_number,
                         byte_offset=raw.tell(),
                         filters=filters,
+                        page_filter_rules=page_filter_rules,
                         seed=seed,
                         metrics=metrics,
                         maximum_text_bytes=max_decompressed_text_bytes,
@@ -216,41 +246,81 @@ class WackyWackyAdapter:
         extra_reports: Dict[str, Dict[str, Any]] = {}
         finalization_blocked = False
         final_boilerplate_report: Optional[Dict[str, Any]] = None
-        if config.get("profile_name") == "mvp":
-            rules = _boilerplate_rules(filters)
-            saved_report = cursor.get("boilerplate_report")
-            reuse_saved_report = (
-                cursor.get("complete") is True
-                and isinstance(saved_report, dict)
-                and saved_report.get("decision") == rules["decision"]
+        profile_name = str(config.get("profile_name"))
+        rules = _boilerplate_rules(filters, profile_name)
+        saved_report = cursor.get("boilerplate_report")
+        saved_line_filter = (
+            _restore_line_filter_report(
+                saved_report.get("line_filter"), minimum_line_characters
             )
-            if reuse_saved_report:
-                report = _restore_boilerplate_report(saved_report, rules["decision"])
+            if cursor.get("complete") is True and isinstance(saved_report, dict)
+            else None
+        )
+        if saved_line_filter is None:
+            documents, line_filter_report = _filter_short_lines(
+                documents,
+                minimum_line_characters,
+                rules,
+            )
+            metrics["short_lines_considered"] = line_filter_report[
+                "lines_considered"
+            ]
+            metrics["short_lines_removed"] = line_filter_report["lines_removed"]
+            metrics["short_line_characters_removed"] = line_filter_report[
+                "removed_characters"
+            ]
+            metrics["documents_affected_by_short_line_filter"] = (
+                line_filter_report["affected_documents"]
+            )
+            metrics["documents_discarded_by_short_line_filter"] = (
+                line_filter_report["documents_discarded_total"]
+            )
+        else:
+            line_filter_report = saved_line_filter
+        reuse_saved_report = (
+            cursor.get("complete") is True
+            and isinstance(saved_report, dict)
+            and saved_report.get("decision") == rules["decision"]
+        )
+        if reuse_saved_report:
+            report = _restore_boilerplate_report(
+                saved_report,
+                rules["decision"],
+                profile_name,
+            )
+        else:
+            if (
+                isinstance(saved_report, dict)
+                and saved_report.get("decision") == "remove_exact"
+            ):
+                raise ConfigError(
+                    "cannot change the boilerplate decision after exact removal"
+                )
+            analysis = _analyze_boilerplate(documents, rules)
+            simulated_documents, simulation = _remove_exact_boilerplate(
+                documents,
+                analysis,
+                rules,
+            )
+            if rules["decision"] == "remove_exact":
+                documents = simulated_documents
+                applied = dict(simulation)
             else:
-                if (
-                    isinstance(saved_report, dict)
-                    and saved_report.get("decision") == "remove_exact"
-                ):
-                    raise ConfigError(
-                        "cannot change the boilerplate decision after exact removal"
-                    )
-                report, repeated_hashes = _boilerplate_report(documents, rules)
-                decision = rules["decision"]
-                if decision == "remove_exact":
-                    documents = _remove_repeated_paragraphs(
-                        documents,
-                        repeated_hashes,
-                        rules["minimum_paragraph_characters"],
-                    )
-                    report["removed_paragraph_occurrences"] = report[
-                        "matching_paragraph_occurrences"
-                    ]
-                else:
-                    report["removed_paragraph_occurrences"] = 0
-                report["finalization_blocked"] = decision == "pending"
-            finalization_blocked = bool(report["finalization_blocked"])
-            final_boilerplate_report = report
-            extra_reports["boilerplate_report"] = report
+                applied = _no_removal_metrics(
+                    len(documents), simulation["original_characters"]
+                )
+            report = _boilerplate_report(
+                documents_before=len(analysis.normalized_documents),
+                profile_name=profile_name,
+                rules=rules,
+                analysis=analysis,
+                simulation=simulation,
+                applied=applied,
+                line_filter=line_filter_report,
+            )
+        finalization_blocked = bool(report["finalization_blocked"])
+        final_boilerplate_report = report
+        extra_reports["boilerplate_report"] = report
 
         metrics["selected_documents"] = len(documents)
         complete_source_scan = final_offset == path.stat().st_size
@@ -334,6 +404,8 @@ def _validate_config(
         raise ConfigError(
             "WackyWacky filters.same_as_null_values must be ['', 'NULL']"
         )
+    _page_filter_rules(filters)
+    _line_filter_minimum(filters)
     profile_name = config.get("profile_name")
     selection = config["profile"].get("selection")
     expected_selection = {
@@ -349,7 +421,7 @@ def _validate_config(
     seed = config["preparation"].get("seed")
     if not isinstance(seed, int) or isinstance(seed, bool) or seed < 0:
         raise ConfigError("preparation.seed must be a non-negative integer")
-    _boilerplate_rules(filters)
+    _boilerplate_rules(filters, profile_name)
 
 
 def _configured_columns(source: Dict[str, Any]) -> Tuple[str, ...]:
@@ -407,6 +479,7 @@ def _eligible_document(
     row_number: int,
     byte_offset: int,
     filters: Dict[str, Any],
+    page_filter_rules: Dict[str, Tuple[str, ...]],
     seed: int,
     metrics: Dict[str, int],
     maximum_text_bytes: int,
@@ -426,6 +499,10 @@ def _eligible_document(
     same_as_null_values = filters.get("same_as_null_values", [""])
     if filters.get("exclude_same_as", True) and same_as not in same_as_null_values:
         metrics["filtered_same_as"] += 1
+        return None
+    page_rejection_reason = _page_rejection_reason(record, page_filter_rules)
+    if page_rejection_reason is not None:
+        metrics[f"filtered_page_{page_rejection_reason}"] += 1
         return None
 
     text, text_md5_matches = _decode_text(
@@ -461,6 +538,105 @@ def _eligible_document(
             "text_ref_sha256": stable_hash("wackywacky-text-md5", text_md5),
             "selection_score": score,
         },
+    )
+
+
+def _page_filter_rules(filters: Dict[str, Any]) -> Dict[str, Tuple[str, ...]]:
+    value = filters.get("page_filter")
+    if not isinstance(value, dict):
+        raise ConfigError("filters.page_filter must be an object")
+    expected = {
+        "search_title_markers",
+        "search_query_parameters",
+        "search_query_value_markers",
+        "search_path_segments",
+        "listing_path_segments",
+    }
+    if set(value) != expected:
+        raise ConfigError(
+            "filters.page_filter must define only the documented page rules"
+        )
+    result: Dict[str, Tuple[str, ...]] = {}
+    for name in sorted(expected):
+        items = value.get(name)
+        if (
+            not isinstance(items, list)
+            or not items
+            or any(not isinstance(item, str) or not item.strip() for item in items)
+        ):
+            raise ConfigError(f"filters.page_filter.{name} must be a string list")
+        normalized = tuple(item.strip().casefold() for item in items)
+        if len(set(normalized)) != len(normalized):
+            raise ConfigError(f"filters.page_filter.{name} contains duplicates")
+        result[name] = normalized
+    return result
+
+
+def _line_filter_minimum(filters: Dict[str, Any]) -> int:
+    value = filters.get("line_filter")
+    if not isinstance(value, dict) or set(value) != {"minimum_characters"}:
+        raise ConfigError(
+            "filters.line_filter must define only minimum_characters"
+        )
+    return _positive_int(
+        value.get("minimum_characters"),
+        "filters.line_filter.minimum_characters",
+    )
+
+
+def _page_rejection_reason(
+    record: Dict[str, str], rules: Dict[str, Tuple[str, ...]]
+) -> Optional[str]:
+    title = " ".join(clean_text(record["title"], strip_html=True).casefold().split())
+    if any(
+        _title_starts_with_marker(title, marker)
+        for marker in rules["search_title_markers"]
+    ):
+        return "search"
+
+    for raw_url in (record["url_final"], record["url"]):
+        if not raw_url.strip():
+            continue
+        try:
+            parsed = urlsplit(raw_url.strip())
+            path_segments = tuple(
+                unquote(segment).strip().casefold()
+                for segment in parsed.path.split("/")
+                if segment.strip()
+            )
+            query = tuple(
+                (unquote(key).strip().casefold(), unquote(item).strip().casefold())
+                for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+            )
+        except (UnicodeError, ValueError):
+            continue
+        if any(
+            segment in rules["listing_path_segments"] for segment in path_segments
+        ):
+            return "listing"
+        if any(
+            segment in rules["search_path_segments"] for segment in path_segments
+        ):
+            return "search"
+        if any(
+            key in rules["search_query_parameters"] for key, _ in query
+        ):
+            return "search"
+        if any(
+            marker in item
+            for _, item in query
+            for marker in rules["search_query_value_markers"]
+        ):
+            return "search"
+    return None
+
+
+def _title_starts_with_marker(title: str, marker: str) -> bool:
+    if title == marker:
+        return True
+    return any(
+        title.startswith(f"{marker}{separator}")
+        for separator in (" ", ":", "-", "–", "—", "|")
     )
 
 
@@ -555,140 +731,533 @@ def _ordered_reservoir(
     )
 
 
-def _boilerplate_rules(filters: Dict[str, Any]) -> Dict[str, Any]:
+def _boilerplate_rules(
+    filters: Dict[str, Any], profile_name: str
+) -> Dict[str, Any]:
     value = filters.get("boilerplate")
     if not isinstance(value, dict):
         raise ConfigError("filters.boilerplate must be an object")
-    decision = value.get("decision")
-    if decision not in {"pending", "keep", "remove_exact"}:
-        raise ConfigError("boilerplate.decision must be pending, keep, or remove_exact")
-    minimum_characters = _positive_int(
-        value.get("minimum_paragraph_characters", 80),
-        "boilerplate.minimum_paragraph_characters",
+    if value.get("schema_version") != 4:
+        raise ConfigError("boilerplate.schema_version must be 4")
+    decisions = value.get("decision_by_profile")
+    if not isinstance(decisions, dict) or set(decisions) != {"smoke", "mvp"}:
+        raise ConfigError(
+            "boilerplate.decision_by_profile must define smoke and mvp"
+        )
+    if decisions.get("smoke") != "remove_exact":
+        raise ConfigError("boilerplate smoke decision must be remove_exact")
+    if decisions.get("mvp") not in {"pending", "keep", "remove_exact"}:
+        raise ConfigError(
+            "boilerplate mvp decision must be pending, keep, or remove_exact"
+        )
+    if profile_name not in decisions:
+        raise ConfigError("boilerplate profile must be smoke or mvp")
+
+    cross_domain = value.get("cross_domain_paragraphs")
+    within_domain = value.get("within_domain_blocks")
+    document_filter = value.get("document_filter")
+    if not isinstance(cross_domain, dict):
+        raise ConfigError("boilerplate.cross_domain_paragraphs must be an object")
+    if not isinstance(within_domain, dict):
+        raise ConfigError("boilerplate.within_domain_blocks must be an object")
+    if not isinstance(document_filter, dict):
+        raise ConfigError("boilerplate.document_filter must be an object")
+
+    paragraph_minimum_characters = _positive_int(
+        cross_domain.get("minimum_characters"),
+        "boilerplate.cross_domain_paragraphs.minimum_characters",
     )
-    minimum_documents = _positive_int(
-        value.get("minimum_documents", 5),
-        "boilerplate.minimum_documents",
+    paragraph_minimum_documents = _positive_int(
+        cross_domain.get("minimum_documents"),
+        "boilerplate.cross_domain_paragraphs.minimum_documents",
     )
-    minimum_domains = _positive_int(
-        value.get("minimum_domains", 3),
-        "boilerplate.minimum_domains",
+    paragraph_minimum_domains = _positive_int(
+        cross_domain.get("minimum_domains"),
+        "boilerplate.cross_domain_paragraphs.minimum_domains",
     )
-    if minimum_characters < 80 or minimum_documents < 5 or minimum_domains < 3:
-        raise ConfigError("boilerplate thresholds cannot be below 80 chars, 5 docs, 3 domains")
+    if (
+        paragraph_minimum_characters < 80
+        or paragraph_minimum_documents < 5
+        or paragraph_minimum_domains < 3
+    ):
+        raise ConfigError(
+            "cross-domain boilerplate thresholds cannot be below 80 chars, "
+            "5 docs, and 3 domains"
+        )
+
+    lines_per_block = _positive_int(
+        within_domain.get("lines_per_block"),
+        "boilerplate.within_domain_blocks.lines_per_block",
+    )
+    block_minimum_characters = _positive_int(
+        within_domain.get("minimum_characters"),
+        "boilerplate.within_domain_blocks.minimum_characters",
+    )
+    block_minimum_documents = _positive_int(
+        within_domain.get("minimum_documents"),
+        "boilerplate.within_domain_blocks.minimum_documents",
+    )
+    if lines_per_block != 3:
+        raise ConfigError("within-domain boilerplate blocks must use exactly 3 lines")
+    if block_minimum_characters < 60 or block_minimum_documents < 5:
+        raise ConfigError(
+            "within-domain boilerplate thresholds cannot be below 60 chars and 5 docs"
+        )
+
+    minimum_remaining_characters = _positive_int(
+        document_filter.get("minimum_remaining_characters"),
+        "boilerplate.document_filter.minimum_remaining_characters",
+    )
+    maximum_removed_fraction = document_filter.get("maximum_removed_fraction")
+    if (
+        not isinstance(maximum_removed_fraction, (int, float))
+        or isinstance(maximum_removed_fraction, bool)
+        or not 0 < float(maximum_removed_fraction) <= 0.8
+    ):
+        raise ConfigError(
+            "boilerplate.document_filter.maximum_removed_fraction must be "
+            "greater than 0 and at most 0.8"
+        )
+    if minimum_remaining_characters < 300:
+        raise ConfigError(
+            "boilerplate.document_filter.minimum_remaining_characters cannot "
+            "be below 300"
+        )
     return {
-        "decision": decision,
-        "minimum_paragraph_characters": minimum_characters,
-        "minimum_documents": minimum_documents,
-        "minimum_domains": minimum_domains,
+        "decision": decisions[profile_name],
+        "paragraph_minimum_characters": paragraph_minimum_characters,
+        "paragraph_minimum_documents": paragraph_minimum_documents,
+        "paragraph_minimum_domains": paragraph_minimum_domains,
+        "lines_per_block": lines_per_block,
+        "block_minimum_characters": block_minimum_characters,
+        "block_minimum_documents": block_minimum_documents,
+        "minimum_remaining_characters": minimum_remaining_characters,
+        "maximum_removed_fraction": float(maximum_removed_fraction),
     }
 
 
-def _normalized_paragraphs(text: str) -> List[Tuple[str, str]]:
+def _normalize_document(text: str) -> _NormalizedDocument:
     cleaned = clean_text(text, strip_html=True)
-    paragraphs: List[Tuple[str, str]] = []
+    paragraphs: List[_NormalizedParagraph] = []
     for raw_paragraph in _PARAGRAPH_BREAK_RE.split(cleaned):
-        paragraph = " ".join(raw_paragraph.split())
-        if not paragraph:
+        lines = tuple(
+            normalized
+            for raw_line in raw_paragraph.splitlines()
+            if (normalized := " ".join(raw_line.split()))
+        )
+        if not lines:
             continue
-        paragraphs.append((paragraph, stable_hash("wackywacky-boilerplate", paragraph)))
-    return paragraphs
+        paragraph_text = " ".join(lines)
+        paragraphs.append(
+            _NormalizedParagraph(
+                lines=lines,
+                text=paragraph_text,
+                sha256=stable_hash(
+                    "wackywacky-cross-domain-paragraph-v2",
+                    paragraph_text,
+                ),
+            )
+        )
+    normalized = tuple(paragraphs)
+    return _NormalizedDocument(
+        paragraphs=normalized,
+        text="\n\n".join("\n".join(paragraph.lines) for paragraph in normalized),
+    )
+
+
+def _filter_short_lines(
+    documents: Sequence[Document],
+    minimum_characters: int,
+    rules: Dict[str, Any],
+) -> Tuple[List[Document], Dict[str, Any]]:
+    result: List[Document] = []
+    lines_considered = 0
+    lines_removed = 0
+    affected_documents = 0
+    original_characters = 0
+    removed_characters = 0
+    discarded_short = 0
+    discarded_fraction = 0
+    discarded_total = 0
+
+    for document in documents:
+        normalized = _normalize_document(document.text)
+        kept_paragraphs: List[str] = []
+        document_lines_removed = 0
+        for paragraph in normalized.paragraphs:
+            lines_considered += len(paragraph.lines)
+            kept_lines = [
+                line
+                for line in paragraph.lines
+                if len(line) >= minimum_characters
+            ]
+            document_lines_removed += len(paragraph.lines) - len(kept_lines)
+            if kept_lines:
+                kept_paragraphs.append("\n".join(kept_lines))
+
+        remaining_text = "\n\n".join(kept_paragraphs)
+        before = len(normalized.text)
+        after = len(remaining_text)
+        removed = max(0, before - after)
+        original_characters += before
+        removed_characters += removed
+        lines_removed += document_lines_removed
+        if document_lines_removed:
+            affected_documents += 1
+        removed_fraction = removed / before if before else 0.0
+        too_short = (
+            not remaining_text
+            or (
+                document_lines_removed > 0
+                and after < rules["minimum_remaining_characters"]
+            )
+        )
+        too_much_removed = (
+            document_lines_removed > 0
+            and removed_fraction > rules["maximum_removed_fraction"]
+        )
+        if too_short:
+            discarded_short += 1
+        if too_much_removed:
+            discarded_fraction += 1
+        if too_short or too_much_removed:
+            discarded_total += 1
+            continue
+        result.append(replace(document, text=remaining_text))
+
+    return result, {
+        "minimum_characters": minimum_characters,
+        "input_documents": len(documents),
+        "lines_considered": lines_considered,
+        "lines_removed": lines_removed,
+        "affected_documents": affected_documents,
+        "original_characters": original_characters,
+        "removed_characters": removed_characters,
+        "removed_fraction": (
+            removed_characters / original_characters if original_characters else 0.0
+        ),
+        "documents_discarded_minimum_remaining_characters": discarded_short,
+        "documents_discarded_maximum_removed_fraction": discarded_fraction,
+        "documents_discarded_total": discarded_total,
+        "documents_remaining": len(result),
+    }
+
+
+def _restore_line_filter_report(
+    value: Any, minimum_characters: int
+) -> Optional[Dict[str, Any]]:
+    if value is None:
+        return None
+    required_counts = (
+        "input_documents",
+        "lines_considered",
+        "lines_removed",
+        "affected_documents",
+        "original_characters",
+        "removed_characters",
+        "documents_discarded_minimum_remaining_characters",
+        "documents_discarded_maximum_removed_fraction",
+        "documents_discarded_total",
+        "documents_remaining",
+    )
+    if (
+        not isinstance(value, dict)
+        or value.get("minimum_characters") != minimum_characters
+        or any(
+            not isinstance(value.get(name), int)
+            or isinstance(value.get(name), bool)
+            or value[name] < 0
+            for name in required_counts
+        )
+        or not isinstance(value.get("removed_fraction"), (int, float))
+        or isinstance(value.get("removed_fraction"), bool)
+    ):
+        raise ConfigError("invalid WackyWacky line-filter checkpoint")
+    return dict(value)
+
+
+def _document_blocks(
+    document: _NormalizedDocument,
+    lines_per_block: int,
+    minimum_characters: int,
+) -> List[Tuple[Tuple[Tuple[int, int], ...], str]]:
+    ordered_lines = _ordered_document_lines(document)
+    result: List[Tuple[Tuple[Tuple[int, int], ...], str]] = []
+    for start in range(max(0, len(ordered_lines) - lines_per_block + 1)):
+        window = ordered_lines[start : start + lines_per_block]
+        lines = tuple(item[2] for item in window)
+        if sum(len(line) for line in lines) < minimum_characters:
+            continue
+        result.append(_block_record(window))
+    return result
+
+
+def _ordered_document_lines(
+    document: _NormalizedDocument,
+) -> Tuple[Tuple[int, int, str], ...]:
+    return tuple(
+        (paragraph_index, line_index, line)
+        for paragraph_index, paragraph in enumerate(document.paragraphs)
+        for line_index, line in enumerate(paragraph.lines)
+    )
+
+
+def _block_record(
+    window: Sequence[Tuple[int, int, str]],
+) -> Tuple[Tuple[Tuple[int, int], ...], str]:
+    return (
+        tuple((item[0], item[1]) for item in window),
+        stable_hash(
+            "wackywacky-within-domain-block-v2",
+            "\n".join(item[2] for item in window),
+        ),
+    )
+
+
+def _analyze_boilerplate(
+    documents: Sequence[Document],
+    rules: Dict[str, Any],
+) -> _BoilerplateAnalysis:
+    normalized_documents: Dict[str, _NormalizedDocument] = {}
+    paragraph_documents: Dict[str, set[str]] = {}
+    paragraph_domains: Dict[str, set[str]] = {}
+    paragraph_occurrences: Dict[str, int] = {}
+    block_documents: Dict[Tuple[str, str], set[str]] = {}
+    block_occurrences: Dict[Tuple[str, str], int] = {}
+
+    paragraph_occurrences_considered = 0
+    block_occurrences_considered = 0
+    for document in documents:
+        if document.source_ref in normalized_documents:
+            raise ConfigError("WackyWacky candidate source references must be unique")
+        normalized = _normalize_document(document.text)
+        normalized_documents[document.source_ref] = normalized
+        domain_ref = str(document.metadata["domain_ref_sha256"])
+        paragraph_hashes: set[str] = set()
+        block_keys: set[Tuple[str, str]] = set()
+        for paragraph in normalized.paragraphs:
+            if len(paragraph.text) >= rules["paragraph_minimum_characters"]:
+                paragraph_occurrences_considered += 1
+                paragraph_occurrences[paragraph.sha256] = (
+                    paragraph_occurrences.get(paragraph.sha256, 0) + 1
+                )
+                paragraph_hashes.add(paragraph.sha256)
+        for _, block_hash in _document_blocks(
+            normalized,
+            rules["lines_per_block"],
+            rules["block_minimum_characters"],
+        ):
+            block_occurrences_considered += 1
+            key = (domain_ref, block_hash)
+            block_occurrences[key] = block_occurrences.get(key, 0) + 1
+            block_keys.add(key)
+        for paragraph_hash in paragraph_hashes:
+            paragraph_documents.setdefault(paragraph_hash, set()).add(
+                document.source_ref
+            )
+            paragraph_domains.setdefault(paragraph_hash, set()).add(domain_ref)
+        for block_key in block_keys:
+            block_documents.setdefault(block_key, set()).add(document.source_ref)
+
+    repeated_paragraphs = {
+        paragraph_hash
+        for paragraph_hash, document_refs in paragraph_documents.items()
+        if len(document_refs) >= rules["paragraph_minimum_documents"]
+        and len(paragraph_domains[paragraph_hash])
+        >= rules["paragraph_minimum_domains"]
+    }
+    repeated_blocks = {
+        key
+        for key, document_refs in block_documents.items()
+        if len(document_refs) >= rules["block_minimum_documents"]
+    }
+    return _BoilerplateAnalysis(
+        normalized_documents=normalized_documents,
+        repeated_cross_domain_paragraphs=repeated_paragraphs,
+        repeated_within_domain_blocks=repeated_blocks,
+        paragraph_occurrences_considered=paragraph_occurrences_considered,
+        distinct_paragraph_hashes=len(paragraph_documents),
+        matching_paragraph_occurrences=sum(
+            paragraph_occurrences[value] for value in repeated_paragraphs
+        ),
+        block_occurrences_considered=block_occurrences_considered,
+        distinct_domain_block_hashes=len(block_documents),
+        matching_block_occurrences=sum(
+            block_occurrences[value] for value in repeated_blocks
+        ),
+    )
+
+
+def _remove_exact_boilerplate(
+    documents: Sequence[Document],
+    analysis: _BoilerplateAnalysis,
+    rules: Dict[str, Any],
+) -> Tuple[List[Document], Dict[str, Any]]:
+    result: List[Document] = []
+    affected_documents = 0
+    removed_characters = 0
+    original_characters = 0
+    discarded_short = 0
+    discarded_fraction = 0
+    discarded_total = 0
+
+    for document in documents:
+        normalized = analysis.normalized_documents[document.source_ref]
+        domain_ref = str(document.metadata["domain_ref_sha256"])
+        removed_line_positions: set[Tuple[int, int]] = set()
+        for positions, block_hash in _document_blocks(
+            normalized,
+            rules["lines_per_block"],
+            rules["block_minimum_characters"],
+        ):
+            if (
+                domain_ref,
+                block_hash,
+            ) in analysis.repeated_within_domain_blocks:
+                removed_line_positions.update(positions)
+        kept_paragraphs: List[str] = []
+        for paragraph_index, paragraph in enumerate(normalized.paragraphs):
+            if paragraph.sha256 in analysis.repeated_cross_domain_paragraphs:
+                continue
+            kept_lines = [
+                line
+                for index, line in enumerate(paragraph.lines)
+                if (paragraph_index, index) not in removed_line_positions
+            ]
+            if kept_lines:
+                kept_paragraphs.append("\n".join(kept_lines))
+
+        remaining_text = "\n\n".join(kept_paragraphs)
+        before = len(normalized.text)
+        after = len(remaining_text)
+        removed = max(0, before - after)
+        original_characters += before
+        removed_characters += removed
+        if removed:
+            affected_documents += 1
+        removed_fraction = removed / before if before else 0.0
+        too_short = removed > 0 and after < rules["minimum_remaining_characters"]
+        too_much_removed = (
+            removed > 0
+            and removed_fraction > rules["maximum_removed_fraction"]
+        )
+        if too_short:
+            discarded_short += 1
+        if too_much_removed:
+            discarded_fraction += 1
+        if too_short or too_much_removed:
+            discarded_total += 1
+            continue
+        result.append(replace(document, text=remaining_text))
+
+    return result, {
+        "original_characters": original_characters,
+        "affected_documents": affected_documents,
+        "removed_characters": removed_characters,
+        "removed_fraction": (
+            removed_characters / original_characters if original_characters else 0.0
+        ),
+        "documents_discarded_minimum_remaining_characters": discarded_short,
+        "documents_discarded_maximum_removed_fraction": discarded_fraction,
+        "documents_discarded_total": discarded_total,
+        "documents_remaining": len(result),
+    }
+
+
+def _no_removal_metrics(
+    candidate_documents: int, original_characters: int
+) -> Dict[str, Any]:
+    return {
+        "original_characters": original_characters,
+        "affected_documents": 0,
+        "removed_characters": 0,
+        "removed_fraction": 0.0,
+        "documents_discarded_minimum_remaining_characters": 0,
+        "documents_discarded_maximum_removed_fraction": 0,
+        "documents_discarded_total": 0,
+        "documents_remaining": candidate_documents,
+    }
 
 
 def _boilerplate_report(
-    documents: Sequence[Document],
+    documents_before: int,
+    profile_name: str,
     rules: Dict[str, Any],
-) -> Tuple[Dict[str, Any], set[str]]:
-    minimum_characters = rules["minimum_paragraph_characters"]
-    documents_by_hash: Dict[str, set[str]] = {}
-    domains_by_hash: Dict[str, set[str]] = {}
-    occurrence_counts: Dict[str, int] = {}
-    document_paragraphs: Dict[str, List[str]] = {}
-
-    paragraphs_considered = 0
-    for document in documents:
-        hashes = [
-            paragraph_hash
-            for paragraph, paragraph_hash in _normalized_paragraphs(document.text)
-            if len(paragraph) >= minimum_characters
-        ]
-        document_paragraphs[document.source_ref] = hashes
-        paragraphs_considered += len(hashes)
-        domain_ref = str(document.metadata["domain_ref_sha256"])
-        for paragraph_hash in hashes:
-            occurrence_counts[paragraph_hash] = (
-                occurrence_counts.get(paragraph_hash, 0) + 1
-            )
-        for paragraph_hash in set(hashes):
-            documents_by_hash.setdefault(paragraph_hash, set()).add(
-                document.source_ref
-            )
-            domains_by_hash.setdefault(paragraph_hash, set()).add(domain_ref)
-
-    repeated = {
-        paragraph_hash
-        for paragraph_hash, document_refs in documents_by_hash.items()
-        if len(document_refs) >= rules["minimum_documents"]
-        and len(domains_by_hash[paragraph_hash]) >= rules["minimum_domains"]
-    }
-    affected_documents = sum(
-        1
-        for hashes in document_paragraphs.values()
-        if any(paragraph_hash in repeated for paragraph_hash in hashes)
-    )
-    matching_occurrences = sum(occurrence_counts[value] for value in repeated)
-    report = {
-        "schema_version": "queroquero-boilerplate-report/v1",
+    analysis: _BoilerplateAnalysis,
+    simulation: Dict[str, Any],
+    applied: Dict[str, Any],
+    line_filter: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "schema_version": "queroquero-boilerplate-report/v2",
+        "profile": profile_name,
         "decision": rules["decision"],
         "contains_examples": False,
         "analysis_scope": "selected_candidate_documents",
         "thresholds": {
-            "minimum_paragraph_characters": rules[
-                "minimum_paragraph_characters"
-            ],
-            "minimum_documents": rules["minimum_documents"],
-            "minimum_domains": rules["minimum_domains"],
+            "cross_domain_paragraphs": {
+                "minimum_characters": rules["paragraph_minimum_characters"],
+                "minimum_documents": rules["paragraph_minimum_documents"],
+                "minimum_domains": rules["paragraph_minimum_domains"],
+            },
+            "within_domain_blocks": {
+                "lines_per_block": rules["lines_per_block"],
+                "minimum_characters": rules["block_minimum_characters"],
+                "minimum_documents": rules["block_minimum_documents"],
+            },
+            "document_filter": {
+                "minimum_remaining_characters": rules[
+                    "minimum_remaining_characters"
+                ],
+                "maximum_removed_fraction": rules["maximum_removed_fraction"],
+            },
         },
-        "candidate_documents": len(documents),
-        "paragraph_occurrences_considered": paragraphs_considered,
-        "distinct_paragraph_hashes": len(documents_by_hash),
-        "repeated_paragraph_hashes": len(repeated),
-        "affected_documents": affected_documents,
-        "matching_paragraph_occurrences": matching_occurrences,
+        "candidate_documents": line_filter["input_documents"],
+        "line_filter": dict(line_filter),
+        "boilerplate_candidate_documents": documents_before,
+        "analysis": {
+            "paragraph_occurrences_considered": (
+                analysis.paragraph_occurrences_considered
+            ),
+            "distinct_paragraph_hashes": analysis.distinct_paragraph_hashes,
+            "cross_domain_paragraphs_repeated": len(
+                analysis.repeated_cross_domain_paragraphs
+            ),
+            "matching_cross_domain_paragraph_occurrences": (
+                analysis.matching_paragraph_occurrences
+            ),
+            "block_occurrences_considered": analysis.block_occurrences_considered,
+            "distinct_domain_block_hashes": analysis.distinct_domain_block_hashes,
+            "within_domain_blocks_repeated": len(
+                analysis.repeated_within_domain_blocks
+            ),
+            "matching_within_domain_block_occurrences": (
+                analysis.matching_block_occurrences
+            ),
+        },
+        "simulation": dict(simulation),
+        "applied": dict(applied),
+        "finalization_blocked": rules["decision"] == "pending",
     }
-    return report, repeated
 
 
-def _restore_boilerplate_report(value: Any, decision: str) -> Dict[str, Any]:
+def _restore_boilerplate_report(
+    value: Any, decision: str, profile_name: str
+) -> Dict[str, Any]:
     if (
         not isinstance(value, dict)
-        or value.get("schema_version") != "queroquero-boilerplate-report/v1"
+        or value.get("schema_version") != "queroquero-boilerplate-report/v2"
+        or value.get("profile") != profile_name
         or value.get("decision") != decision
+        or value.get("contains_examples") is not False
         or not isinstance(value.get("finalization_blocked"), bool)
+        or not isinstance(value.get("analysis"), dict)
+        or not isinstance(value.get("simulation"), dict)
+        or not isinstance(value.get("applied"), dict)
+        or not isinstance(value.get("line_filter"), dict)
     ):
         raise ConfigError("invalid WackyWacky boilerplate checkpoint")
     return dict(value)
-
-
-def _remove_repeated_paragraphs(
-    documents: Sequence[Document],
-    repeated_hashes: set[str],
-    minimum_characters: int,
-) -> List[Document]:
-    if not repeated_hashes:
-        return list(documents)
-    result: List[Document] = []
-    for document in documents:
-        kept = [
-            paragraph
-            for paragraph, paragraph_hash in _normalized_paragraphs(document.text)
-            if len(paragraph) < minimum_characters
-            or paragraph_hash not in repeated_hashes
-        ]
-        text = "\n\n".join(kept).strip()
-        if text:
-            result.append(replace(document, text=text))
-    return result
 
 
 def _sampled_source_guard(path: Path, sample_bytes: int) -> Dict[str, Any]:
@@ -819,8 +1388,15 @@ def _resume_metrics(value: Any) -> Dict[str, int]:
         "filtered_missing_text": 0,
         "filtered_missing_text_md5": 0,
         "filtered_same_as": 0,
+        "filtered_page_search": 0,
+        "filtered_page_listing": 0,
         "text_md5_mismatches": 0,
         "selected_documents": 0,
+        "short_lines_considered": 0,
+        "short_lines_removed": 0,
+        "short_line_characters_removed": 0,
+        "documents_affected_by_short_line_filter": 0,
+        "documents_discarded_by_short_line_filter": 0,
     }
     if value is None:
         return metrics
