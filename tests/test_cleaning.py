@@ -22,6 +22,22 @@ class CleaningTests(unittest.TestCase):
         value = "comparação <nao-fechado continua aqui"
         self.assertEqual(clean_text(value), value)
 
+    def test_brwac_detokenization_fixes_only_targeted_spacing(self) -> None:
+        value = (
+            "Direitos Humanos , nesta terça-feira ( 8 ) , no ( TJGO ) . "
+            "Filhos - Transformando realidades"
+        )
+        self.assertEqual(clean_text(value), value)
+        self.assertEqual(
+            clean_text(value, punctuation_spacing="detokenize_brwac_v1"),
+            "Direitos Humanos, nesta terça-feira (8), no (TJGO). "
+            "Filhos - Transformando realidades",
+        )
+
+    def test_unknown_punctuation_spacing_policy_fails_closed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unknown punctuation spacing policy"):
+            clean_text("texto", punctuation_spacing="unknown")
+
 
 if __name__ == "__main__":
     unittest.main()

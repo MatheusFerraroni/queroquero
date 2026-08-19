@@ -11,7 +11,8 @@
     "checkpoint_interval_documents": 64
   },
   "filters": {
-    "strict_utf8": true
+    "strict_utf8": true,
+    "punctuation_spacing": "detokenize_brwac_v1"
   },
   "profiles": {
     "smoke": {

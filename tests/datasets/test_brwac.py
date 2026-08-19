@@ -25,7 +25,10 @@ def resolved_config(candidate_documents: int = 3, checkpoint_interval: int = 64)
                 "encoding": "utf-8",
                 "checkpoint_interval_documents": checkpoint_interval,
             },
-            "filters": {"strict_utf8": True},
+            "filters": {
+                "strict_utf8": True,
+                "punctuation_spacing": "detokenize_brwac_v1",
+            },
         },
         "profile": {
             "candidate_documents": candidate_documents,

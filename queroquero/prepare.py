@@ -152,6 +152,9 @@ def run_preparation(dataset_id: str, profile: str, config_root: Path | None = No
     LOGGER.info("stage=tokenizer status=ready dataset=%s", dataset_id)
 
     min_characters = int(resolved["dataset"]["filters"].get("min_characters", 1))
+    punctuation_spacing = resolved["dataset"]["filters"].get(
+        "punctuation_spacing", "preserve"
+    )
     LOGGER.info("stage=tokenize status=started dataset=%s", dataset_id)
     tokenized, tokenization_metrics = clean_deduplicate_and_tokenize(
         scan.documents,
@@ -159,6 +162,7 @@ def run_preparation(dataset_id: str, profile: str, config_root: Path | None = No
         dataset_id=dataset_id,
         seed=resolved["preparation"]["seed"],
         min_characters=min_characters,
+        punctuation_spacing=punctuation_spacing,
     )
     LOGGER.info(
         "stage=tokenize status=complete dataset=%s documents=%d duplicates=%d",

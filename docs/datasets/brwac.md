@@ -29,6 +29,10 @@ do ZIP. O cursor registra apenas a posição na seleção e permite retomada qua
 fonte e configuração continuam idênticas. A limpeza, deduplicação exata,
 tokenização, split e packing são aplicados pelo núcleo comum.
 
+Como a fonte contém pontuação previamente separada por espaços, o filtro
+versionado `detokenize_brwac_v1` remove somente espaços antes de vírgula/ponto e
+dentro de parênteses. Hífens e os demais símbolos permanecem inalterados.
+
 ```sh
 python -m queroquero.prepare run --dataset brwac --profile smoke
 ```

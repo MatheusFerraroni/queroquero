@@ -66,6 +66,7 @@ def clean_deduplicate_and_tokenize(
     dataset_id: str,
     seed: int,
     min_characters: int,
+    punctuation_spacing: str = "preserve",
 ) -> Tuple[List[TokenizedDocument], Dict[str, int]]:
     eos_token_id = tokenizer.eos_token_id
     if eos_token_id is None:
@@ -83,7 +84,11 @@ def clean_deduplicate_and_tokenize(
 
     for document in documents:
         metrics["documents_received"] += 1
-        text = clean_text(document.text, strip_html=True)
+        text = clean_text(
+            document.text,
+            strip_html=True,
+            punctuation_spacing=punctuation_spacing,
+        )
         if len(text) < min_characters:
             metrics["documents_empty_or_short"] += 1
             continue

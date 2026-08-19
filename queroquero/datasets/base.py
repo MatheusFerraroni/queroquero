@@ -74,9 +74,16 @@ _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _HTML_TAG_RE = re.compile(r"</?[A-Za-z][^>]*>|<!--")
 _HORIZONTAL_SPACE_RE = re.compile(r"[^\S\n]+")
 _EXCESS_NEWLINES_RE = re.compile(r"\n{3,}")
+_SPACE_BEFORE_COMMA_OR_PERIOD_RE = re.compile(r" +([,.])")
+_SPACE_AFTER_OPEN_PAREN_RE = re.compile(r"\( +")
+_SPACE_BEFORE_CLOSE_PAREN_RE = re.compile(r" +\)")
 
 
-def clean_text(value: str, strip_html: bool = True) -> str:
+def clean_text(
+    value: str,
+    strip_html: bool = True,
+    punctuation_spacing: str = "preserve",
+) -> str:
     if not isinstance(value, str):
         raise TypeError("text must be a string")
     text = value.replace("\r\n", "\n").replace("\r", "\n")
@@ -103,6 +110,12 @@ def clean_text(value: str, strip_html: bool = True) -> str:
     text = _HORIZONTAL_SPACE_RE.sub(" ", text)
     text = "\n".join(line.strip() for line in text.split("\n"))
     text = _EXCESS_NEWLINES_RE.sub("\n\n", text)
+    if punctuation_spacing == "detokenize_brwac_v1":
+        text = _SPACE_BEFORE_COMMA_OR_PERIOD_RE.sub(r"\1", text)
+        text = _SPACE_AFTER_OPEN_PAREN_RE.sub("(", text)
+        text = _SPACE_BEFORE_CLOSE_PAREN_RE.sub(")", text)
+    elif punctuation_spacing != "preserve":
+        raise ValueError(f"unknown punctuation spacing policy: {punctuation_spacing}")
     return text.strip()
 
 

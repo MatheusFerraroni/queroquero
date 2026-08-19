@@ -190,6 +190,10 @@ def _validate_config(
         raise ConfigError("BrWaC source.encoding must be 'utf-8'")
     if filters.get("strict_utf8") is not True:
         raise ConfigError("BrWaC filters.strict_utf8 must be true")
+    if filters.get("punctuation_spacing") != "detokenize_brwac_v1":
+        raise ConfigError(
+            "BrWaC filters.punctuation_spacing must be 'detokenize_brwac_v1'"
+        )
     if config["profile"].get("selection") != "representative":
         raise ConfigError("BrWaC selection must be representative")
     seed = config["preparation"].get("seed")
