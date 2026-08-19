@@ -1,23 +1,34 @@
 # Adrenaline
 
-Inspeção de 2026-08-18, somente de metadados e amostras limitadas.
+Inventário de 2026-08-18, feito somente com metadados e amostras estruturais
+limitadas.
 
 | Arquivo | Tamanho | Entradas | Uso |
 | --- | ---: | ---: | --- |
 | `forum.adrenaline.com.br.zip` | 2.157.145.545 bytes | 356.799 | não selecionado |
-| `conversations.zip` | 76.123.303.722 bytes | 4.896.419 | selecionado |
-| `conversations_min.zip` | — | — | fixture de parser |
+| `conversations.zip` | 76.123.303.722 bytes | 4.896.419 | perfil `mvp` |
+| `conversations_min.zip` | — | — | perfil `smoke` |
 | `messages.zip` | — | — | não selecionado |
 
-O ZIP de fórum contém JSONs de categorias e tópicos; as amostras não
-confirmaram um corpus conversacional completo. O ZIP selecionado é grande
-demais para enumeração repetida via SSHFS e seu schema ainda não foi confirmado.
+## Adapter
 
-## Antes da preparação
+O adapter lê diretamente membros `clear_threads/*.tsv`, sem extrair o ZIP.
+Cada TSV é uma conversa sem cabeçalho, com três colunas: timestamp,
+identificador de participante e texto. As mensagens permanecem na ordem da
+fonte e o arquivo é a unidade documental.
 
-1. gerar uma vez o manifesto do diretório central no host dos dados;
-2. validar, em poucas entradas, formato, encoding, colunas e unidade documental;
-3. definir filtros de texto, PII, HTML, duplicação e tamanho;
-4. processar por shard com cursor e budget próprios.
+Identificadores são mapeados apenas em memória para `Participante N`. Timestamp
+e identificador original não entram na projeção textual. HTML é removido pela
+limpeza comum, e registros que não respeitam as três colunas são rejeitados.
 
-Não extrair o ZIP completo nem registrar valores dos documentos.
+O fingerprint agrega nome, CRC e tamanhos dos membros do diretório central,
+além do tamanho do arquivo. A seleção de conversas é determinística, tem budget
+próprio e pode retomar pelo índice do membro sem persistir conteúdo em logs ou
+manifests.
+
+```sh
+python -m queroquero.prepare run --dataset adrenaline --profile smoke
+```
+
+O adapter prepara somente dados; treinamento e mistura com outros corpora ficam
+fora desta etapa.

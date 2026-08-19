@@ -1,0 +1,21 @@
+{
+  "schema_version": "queroquero-preparation/v1",
+  "tokenizer": {
+    "model_id": "Polygl0t/Tucano2-0.6B-Base",
+    "revision": "dad97dc864a8f9a1d240fb9351d098f3af9511d7",
+    "trust_remote_code": false
+  },
+  "sequence_length": 1024,
+  "seed": 42,
+  "output_root": "derived",
+  "storage": {
+    "format": "parquet",
+    "compression": "zstd",
+    "sequences_per_shard": 1024
+  },
+  "cleaning": {
+    "unicode_normalization": "NFC",
+    "strip_html": true,
+    "strip_control_characters": true
+  }
+}

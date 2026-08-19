@@ -1,6 +1,7 @@
 # WackyWacky PT-BR
 
-Inspeção de 2026-08-18 do arquivo `wacky/pages.tsv` em mount somente leitura.
+Inventário de 2026-08-18 do arquivo `wacky/pages.tsv` em origem somente
+leitura.
 
 | Medida | Valor |
 | --- | ---: |
@@ -9,30 +10,49 @@ Inspeção de 2026-08-18 do arquivo `wacky/pages.tsv` em mount somente leitura.
 | colunas | 19 |
 | total de linhas | desconhecido |
 
-Campos relevantes: `id`, `domain_id`, `url_md5`, `status`, `text`,
-`text_md5`, `same_as` e timestamps. URLs e títulos não entram no texto.
+Uma amostra histórica limitada de 2.100 linhas em sete offsets encontrou 621
+textos. Ela não é usada para estimar o rendimento porque a fonte parece
+ordenada por status.
 
-Uma amostra limitada de 2.100 linhas em sete offsets encontrou 621 textos. Dos
-registros `done`, 568 tinham texto; a amostra não é representativa porque o
-arquivo parece ordenado por status.
+Campos utilizados na seleção: `domain_id`, `status`, `text`, `text_md5` e
+`same_as`. URLs, títulos, HTML, timestamps e IDs não entram no texto nem nos
+relatórios.
 
-## Seleção inicial
+## Seleção
+
+São elegíveis apenas registros que satisfazem todas as regras:
 
 ```text
 status == "done"
 text presente
 text_md5 presente
+same_as ausente
 ```
 
-Registros bloqueados, falhos, pendentes, sem texto ou apenas `same_as` ficam
-fora por padrão.
+O perfil `smoke` usa um prefixo limitado para engenharia. O `mvp` faz uma
+passagem sequencial completa, calcula o fingerprint durante a leitura e mantém
+um reservoir determinístico dentro do budget. O cursor por byte e por registro
+permite retomar a passagem; qualquer alteração incompatível da fonte é
+rejeitada.
 
-## Antes da preparação
+## Gate de boilerplate
 
-1. fazer uma única passagem sequencial e retomável por byte;
-2. contar status, textos, tokens e duplicação por `text_md5`;
-3. medir idioma, boilerplate, qualidade e distribuição por domínio;
-4. definir budget e gerar shards com proveniência;
-5. invalidar derivados se fonte ou configuração mudar.
+No perfil `mvp`, a decisão inicial é `pending`. A execução gera
+`boilerplate_report.json`, sem exemplos de texto, e bloqueia a publicação dos
+shards finais. O relatório conta parágrafos normalizados com pelo menos 80
+caracteres que aparecem em 5 documentos e 3 domínios distintos.
 
-Não usar a amostra parcial para estimar o rendimento global.
+Depois da revisão, altere `filters.boilerplate.decision` em
+`configs/datasets/wackywacky.json` para uma opção explícita:
+
+- `keep`: preserva todos os parágrafos;
+- `remove_exact`: remove somente os parágrafos que atendem aos limiares
+  documentados.
+
+```sh
+python -m queroquero.prepare run --dataset wackywacky --profile mvp
+```
+
+Deduplicação exata de documentos, limpeza, tokenização, split e packing são
+responsabilidade do núcleo comum. A amostra histórica parcial não é usada para
+estimar o rendimento global.

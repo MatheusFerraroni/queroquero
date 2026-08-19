@@ -1,0 +1,39 @@
+{
+  "schema_version": "queroquero-dataset-config/v1",
+  "dataset_id": "gigaverbo",
+  "adapter": "gigaverbo",
+  "source": {
+    "provider": "huggingface",
+    "dataset_id": "Polygl0t/gigaverbo-v2",
+    "revision": "b39dfa703102a20dc609ed6e7aaae22e8e3a233f",
+    "config_name": "default",
+    "split": "train",
+    "streaming": true,
+    "shard_glob": "data/default/train-*.parquet"
+  },
+  "filters": {
+    "min_edu_int_score": 4
+  },
+  "selection": {
+    "shuffle_buffer_size": 10000,
+    "checkpoint_interval": 64
+  },
+  "license_policy": "internal_research_only",
+  "redistribution_status": "internal_research_only",
+  "profiles": {
+    "smoke": {
+      "train_sequences": 8,
+      "eval_sequences": 2,
+      "candidate_documents": 128,
+      "max_source_records": 8192,
+      "selection": "engineering_prefix"
+    },
+    "mvp": {
+      "train_sequences": 256,
+      "eval_sequences": 32,
+      "candidate_documents": 4096,
+      "max_source_records": 262144,
+      "selection": "representative"
+    }
+  }
+}

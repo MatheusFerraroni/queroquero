@@ -1,0 +1,382 @@
+from __future__ import annotations
+
+import copy
+import json
+import os
+import shutil
+import tempfile
+import unittest
+from pathlib import Path
+from typing import Any
+from unittest.mock import patch
+
+from queroquero.config import ConfigError
+from queroquero.datasets.wackywacky import (
+    WackyWackyAdapter,
+    _EXPECTED_COLUMNS,
+    _sampled_source_guard,
+)
+
+
+def resolved_config(
+    *,
+    profile_name: str = "smoke",
+    candidate_documents: int = 3,
+    decision: str = "pending",
+    checkpoint_interval: int = 100,
+) -> dict[str, Any]:
+    return {
+        "profile_name": profile_name,
+        "preparation": {"seed": 42},
+        "dataset": {
+            "source": {
+                "root_env": "TEST_PTBR_DATASET_ROOT",
+                "path": "wacky/pages.tsv",
+                "format": "tsv",
+                "encoding": "utf-8",
+                "columns": list(_EXPECTED_COLUMNS),
+                "max_field_size_bytes": 1024 * 1024,
+                "checkpoint_interval_records": checkpoint_interval,
+                "fingerprint_sample_bytes": 64,
+            },
+            "filters": {
+                "status": "done",
+                "require_text": True,
+                "require_text_md5": True,
+                "exclude_same_as": True,
+                "boilerplate": {
+                    "decision": decision,
+                    "minimum_paragraph_characters": 80,
+                    "minimum_documents": 5,
+                    "minimum_domains": 3,
+                },
+            },
+        },
+        "profile": {
+            "candidate_documents": candidate_documents,
+            "selection": (
+                "engineering_prefix" if profile_name == "smoke" else "representative"
+            ),
+        },
+    }
+
+
+def record(
+    index: int,
+    text: str,
+    *,
+    domain: str = "domain-a",
+    status: str = "done",
+    text_md5: str | None = None,
+    same_as: str = "",
+) -> dict[str, str]:
+    value = {column: "" for column in _EXPECTED_COLUMNS}
+    value.update(
+        {
+            "id": f"private-record-{index}",
+            "domain_id": domain,
+            "same_as": same_as,
+            "url_md5": f"url-digest-{index}",
+            "status": status,
+            "text": text,
+            "text_md5": text_md5 if text_md5 is not None else f"text-digest-{index}",
+        }
+    )
+    return value
+
+
+def write_tsv(path: Path, records: list[dict[str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        stream.write("\t".join(_EXPECTED_COLUMNS) + "\n")
+        for item in records:
+            values = [item[column] for column in _EXPECTED_COLUMNS]
+            if any("\t" in value or "\n" in value or "\r" in value for value in values):
+                raise ValueError("synthetic TSV values must fit on one physical line")
+            stream.write("\t".join(values) + "\n")
+
+
+class WackyWackyAdapterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.source = self.root / "wacky" / "pages.tsv"
+        self.environment = patch.dict(
+            os.environ, {"TEST_PTBR_DATASET_ROOT": str(self.root)}
+        )
+        self.environment.start()
+
+    def tearDown(self) -> None:
+        self.environment.stop()
+        self.temporary.cleanup()
+
+    def test_smoke_uses_filtered_prefix_and_does_not_expose_record_ids(self) -> None:
+        write_tsv(
+            self.source,
+            [
+                record(1, "não elegível", status="queued"),
+                record(2, "", text_md5="present"),
+                record(3, "sem hash", text_md5=""),
+                record(4, "duplicado", same_as="canonical-record"),
+                record(5, "Texto elegível A"),
+                record(6, '"Texto elegível B" seguido'),
+                record(7, "Não deve ser lido"),
+            ],
+        )
+
+        result = WackyWackyAdapter().scan(
+            resolved_config(candidate_documents=2)
+        )
+
+        self.assertEqual(
+            [document.text for document in result.documents],
+            ["Texto elegível A", '"Texto elegível B" seguido'],
+        )
+        self.assertEqual(result.metrics["rows_seen"], 6)
+        self.assertEqual(result.metrics["filtered_status"], 1)
+        self.assertEqual(result.metrics["filtered_missing_text"], 1)
+        self.assertEqual(result.metrics["filtered_missing_text_md5"], 1)
+        self.assertEqual(result.metrics["filtered_same_as"], 1)
+        self.assertFalse(result.source_fingerprint["complete_source_scan"])
+        self.assertEqual(result.extra_reports, {})
+        for document in result.documents:
+            self.assertNotIn("private-record", document.source_ref)
+            self.assertNotIn("domain-a", repr(document.metadata))
+
+    def test_mvp_scans_the_full_source_and_pending_blocks_finalization(self) -> None:
+        rows = [record(index, f"Documento sintético {index}") for index in range(12)]
+        write_tsv(self.source, rows)
+        config = resolved_config(profile_name="mvp", candidate_documents=4)
+
+        first = WackyWackyAdapter().scan(config)
+        second = WackyWackyAdapter().scan(config)
+
+        self.assertEqual(first.documents, second.documents)
+        self.assertEqual(first.metrics["rows_seen"], len(rows))
+        self.assertEqual(first.metrics["selected_documents"], 4)
+        self.assertTrue(first.source_fingerprint["complete_source_scan"])
+        self.assertEqual(
+            first.source_fingerprint["method"], "streamed-full-sha256-v1"
+        )
+        self.assertTrue(first.cursor["finalization_blocked"])
+        report = first.extra_reports["boilerplate_report"]
+        self.assertTrue(report["finalization_blocked"])
+        self.assertFalse(report["contains_examples"])
+        serialized = json.dumps(report, ensure_ascii=False)
+        self.assertNotIn("Documento sintético", serialized)
+        self.assertNotIn("private-record", serialized)
+
+    def test_byte_identical_copies_have_identical_fingerprint_and_cursor(self) -> None:
+        rows = [record(index, f"Documento sintético {index}") for index in range(8)]
+        write_tsv(self.source, rows)
+        config = resolved_config(profile_name="mvp", candidate_documents=4)
+        first = WackyWackyAdapter().scan(config)
+
+        copied_root = self.root / "copied-root"
+        copied_source = copied_root / "wacky" / "pages.tsv"
+        copied_source.parent.mkdir(parents=True)
+        shutil.copyfile(self.source, copied_source)
+        with patch.dict(
+            os.environ, {"TEST_PTBR_DATASET_ROOT": str(copied_root)}
+        ):
+            copied = WackyWackyAdapter().scan(config)
+
+        self.assertEqual(first.source_fingerprint, copied.source_fingerprint)
+        self.assertEqual(first.cursor, copied.cursor)
+        self.assertEqual(first.documents, copied.documents)
+
+    def test_boilerplate_keep_and_remove_exact(self) -> None:
+        repeated = (
+            "Trecho institucional repetido de forma exata e suficientemente "
+            "longo para a regra automática de boilerplate."
+        )
+        rows = [
+            record(
+                index,
+                f"<p>{repeated}</p><p>final-{index}</p>",
+                domain=f"domain-{index % 3}",
+            )
+            for index in range(6)
+        ]
+        write_tsv(self.source, rows)
+
+        kept = WackyWackyAdapter().scan(
+            resolved_config(
+                profile_name="mvp",
+                candidate_documents=10,
+                decision="keep",
+            )
+        )
+        self.assertFalse(kept.cursor["finalization_blocked"])
+        self.assertEqual(
+            kept.extra_reports["boilerplate_report"]["repeated_paragraph_hashes"],
+            1,
+        )
+        self.assertTrue(all(repeated in document.text for document in kept.documents))
+
+        removed = WackyWackyAdapter().scan(
+            resolved_config(
+                profile_name="mvp",
+                candidate_documents=10,
+                decision="remove_exact",
+            )
+        )
+        report = removed.extra_reports["boilerplate_report"]
+        self.assertFalse(removed.cursor["finalization_blocked"])
+        self.assertEqual(report["affected_documents"], 6)
+        self.assertEqual(report["removed_paragraph_occurrences"], 6)
+        self.assertEqual(len(removed.documents), 6)
+        self.assertTrue(
+            all(document.text.startswith("final-") for document in removed.documents)
+        )
+
+        resumed = WackyWackyAdapter().scan(
+            resolved_config(
+                profile_name="mvp",
+                candidate_documents=10,
+                decision="remove_exact",
+            ),
+            resume_cursor=removed.cursor,
+            resume_documents=removed.documents,
+        )
+        self.assertEqual(resumed.documents, removed.documents)
+        self.assertEqual(resumed.extra_reports, removed.extra_reports)
+
+    def test_pending_candidates_can_be_reused_after_review(self) -> None:
+        repeated = "B" * 90
+        rows = [
+            record(
+                index,
+                f"<p>{repeated}</p><p>conteúdo-{index}</p>",
+                domain=f"domain-{index % 3}",
+            )
+            for index in range(6)
+        ]
+        write_tsv(self.source, rows)
+        pending = WackyWackyAdapter().scan(
+            resolved_config(profile_name="mvp", candidate_documents=10)
+        )
+
+        with patch(
+            "queroquero.datasets.wackywacky._hash_prefix",
+            side_effect=AssertionError("completed scan must not be read again"),
+        ):
+            reviewed = WackyWackyAdapter().scan(
+                resolved_config(
+                    profile_name="mvp",
+                    candidate_documents=10,
+                    decision="remove_exact",
+                ),
+                resume_cursor=pending.resume_cursor,
+                resume_documents=pending.documents,
+            )
+
+        self.assertFalse(reviewed.cursor["finalization_blocked"])
+        self.assertEqual(
+            reviewed.extra_reports["boilerplate_report"][
+                "removed_paragraph_occurrences"
+            ],
+            6,
+        )
+        self.assertTrue(
+            all(document.text.startswith("conteúdo-") for document in reviewed.documents)
+        )
+
+    def test_completed_resume_rehashes_when_local_stat_changes(self) -> None:
+        rows = [
+            record(index, "A" * 300 + f"-{index}-" + "B" * 300)
+            for index in range(20)
+        ]
+        write_tsv(self.source, rows)
+        config = resolved_config(profile_name="mvp", candidate_documents=10)
+        pending = WackyWackyAdapter().scan(config)
+        before_guard = _sampled_source_guard(self.source, 64)
+
+        data = bytearray(self.source.read_bytes())
+        maximum_start = max(0, len(data) - 64)
+        sample_positions = {
+            0,
+            min(maximum_start, len(data) // 4),
+            min(maximum_start, len(data) // 2),
+            min(maximum_start, (len(data) * 3) // 4),
+            maximum_start,
+        }
+        sampled_indexes = {
+            index
+            for start in sample_positions
+            for index in range(start, min(start + 64, len(data)))
+        }
+        changed_index = next(
+            index
+            for index, value in enumerate(data)
+            if value == ord("A") and index not in sampled_indexes
+        )
+        data[changed_index] = ord("C")
+        self.source.write_bytes(data)
+        after_guard = _sampled_source_guard(self.source, 64)
+        self.assertEqual(
+            before_guard["resume_guard_sha256"],
+            after_guard["resume_guard_sha256"],
+        )
+        self.assertNotEqual(
+            before_guard["local_source_stat_sha256"],
+            after_guard["local_source_stat_sha256"],
+        )
+
+        with self.assertRaisesRegex(ConfigError, "prefix changed"):
+            WackyWackyAdapter().scan(
+                resolved_config(
+                    profile_name="mvp",
+                    candidate_documents=10,
+                    decision="keep",
+                ),
+                resume_cursor=pending.resume_cursor,
+                resume_documents=pending.documents,
+            )
+
+    def test_resume_from_byte_cursor_and_reject_changed_prefix(self) -> None:
+        rows = [record(index, f"Texto {index}") for index in range(5)]
+        write_tsv(self.source, rows)
+        config = resolved_config(candidate_documents=3, checkpoint_interval=1)
+        saved: dict[str, Any] = {}
+
+        class Interrupted(Exception):
+            pass
+
+        def stop_after_first(cursor: dict[str, Any], documents: list[Any]) -> None:
+            saved["cursor"] = cursor
+            saved["documents"] = documents
+            raise Interrupted
+
+        with self.assertRaises(Interrupted):
+            WackyWackyAdapter().scan(config, checkpoint=stop_after_first)
+
+        resumed = WackyWackyAdapter().scan(
+            config,
+            resume_cursor=saved["cursor"],
+            resume_documents=saved["documents"],
+        )
+        uninterrupted = WackyWackyAdapter().scan(config)
+        self.assertEqual(resumed.documents, uninterrupted.documents)
+        self.assertEqual(resumed.metrics, uninterrupted.metrics)
+
+        changed = copy.deepcopy(rows)
+        changed[0]["text"] = "Texto alterado"
+        write_tsv(self.source, changed)
+        with self.assertRaisesRegex(ConfigError, "source changed|prefix changed"):
+            WackyWackyAdapter().scan(
+                config,
+                resume_cursor=saved["cursor"],
+                resume_documents=saved["documents"],
+            )
+
+    def test_rejects_non_19_column_header_without_reading_values(self) -> None:
+        self.source.parent.mkdir(parents=True, exist_ok=True)
+        self.source.write_text("first\tsecond\nvalue\tvalue\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "19-column schema"):
+            WackyWackyAdapter().scan(resolved_config())
+
+
+if __name__ == "__main__":
+    unittest.main()

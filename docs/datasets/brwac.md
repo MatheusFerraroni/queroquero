@@ -1,6 +1,6 @@
 # BrWaC-CLEAN
 
-Inspeção de 2026-08-18, somente de metadados e amostras limitadas.
+Inventário de 2026-08-18, feito somente com metadados e amostras limitadas.
 
 | Item | Valor |
 | --- | ---: |
@@ -10,19 +10,28 @@ Inspeção de 2026-08-18, somente de metadados e amostras limitadas.
 | bytes descompactados | 12.574.567.129 |
 | `names.tsv` descompactado | 482.810.058 bytes |
 
-A fonte selecionada é somente `data/*.txt`. `names.tsv` é metadado e não entra
-como texto de treino.
+A fonte de treino é exclusivamente `data/*.txt`. `names.tsv` é metadado e não
+é lido como texto.
 
-Uma amostra de 11 documentos abriu como UTF-8, sem estrutura JSON ou tags
-HTML/XML reconhecíveis. Isso não mede qualidade, duplicação ou outliers do
-corpus completo.
+Uma amostra histórica de 11 documentos abriu como UTF-8, sem estrutura
+JSON/XML reconhecível. Essa observação não mede qualidade, duplicação ou
+outliers do corpus completo.
 
-## Antes da preparação
+## Adapter
 
-1. manifestar os membros e fingerprints do ZIP;
-2. amostrar tamanhos diferentes de forma determinística;
-3. medir tokens com o tokenizer do modelo;
-4. definir limites, limpeza, deduplicação e budget;
-5. gerar shards retomáveis preservando `archive` e `member_path`.
+O adapter manifesta o diretório central e lê documentos selecionados
+diretamente do ZIP, sempre como UTF-8 estrito. O ZIP completo nunca é extraído.
+A seleção usa o hash estável do caminho do membro e budgets independentes por
+perfil, evitando depender da ordem física do arquivo.
 
-Não extrair o ZIP inteiro.
+O fingerprint agrega nome, CRC e tamanhos de todos os membros, além do tamanho
+do ZIP. O cursor registra apenas a posição na seleção e permite retomada quando
+fonte e configuração continuam idênticas. A limpeza, deduplicação exata,
+tokenização, split e packing são aplicados pelo núcleo comum.
+
+```sh
+python -m queroquero.prepare run --dataset brwac --profile smoke
+```
+
+As métricas e a proveniência usam hashes e contagens; conteúdo dos documentos e
+caminhos absolutos não são persistidos nos shards.

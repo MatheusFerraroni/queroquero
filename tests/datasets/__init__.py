@@ -1,0 +1,1 @@
+"""Synthetic adapter tests."""
