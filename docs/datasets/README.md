@@ -12,7 +12,9 @@ Relatórios disponíveis:
   `conversations.zip`;
 - [BrWaC-CLEAN](brwac.md): `BrWac.zip`;
 - [MultiWOZ-PTBR](multiwoz-ptbr.md): 17 arquivos `dialogues_*.json`;
-- [WackyWacky PT-BR](wackywacky.md): `pages.tsv`.
+- [WackyWacky PT-BR](wackywacky.md): `pages.tsv`;
+- [GigaVerbo-v2](gigaverbo.md): exploração oficial e condições de
+  pré-ativação, sem acesso a registros individuais.
 
 ## Inventário confirmado
 
@@ -32,7 +34,8 @@ as entradas sejam documentos úteis para treino.
 
 ## Decisões de fontes
 
-Decisão registrada em 2026-08-18:
+Decisões locais registradas em 2026-08-18; pré-ativação do GigaVerbo-v2
+documentada em 2026-08-19:
 
 | Dataset | Fonte selecionada | Uso definido |
 | --- | --- | --- |
@@ -41,7 +44,7 @@ Decisão registrada em 2026-08-18:
 | MultiWOZ-PTBR | `dialogues_001.json` a `dialogues_017.json` | Todos os 17 arquivos, preservando diálogos e ordem dos turns |
 | OuterSpace | `conversations.zip` | Corpus conversacional completo selecionado para este dataset |
 | Adrenaline | `conversations.zip` | Corpus conversacional completo selecionado para este dataset |
-| GigaVerbo-v2 | nenhuma por enquanto | Dataset desabilitado nesta etapa do projeto |
+| GigaVerbo-v2 | candidato `Polygl0t/gigaverbo-v2`, `default`/`train`, em revisão pinada | Pré-ativação documentada; continua desabilitado até decisão explícita |
 
 Para Adrenaline e OuterSpace, `conversations_min.zip` serve somente como fixture
 pequena para desenvolver e testar o parser. Os exports `forum.*.zip` não foram
@@ -79,8 +82,13 @@ comandos reproduzíveis devem ser versionados aqui.
 
 ## Estado da decisão
 
-Os arquivos-fonte estão escolhidos. Ainda não foram definidos a quantidade de
+Os arquivos-fonte locais estão escolhidos; o GigaVerbo-v2 permanece uma fonte
+remota candidata e desabilitada. Ainda não foram definidos a quantidade de
 documentos ou tokens, os limites por fonte e todos os filtros de qualidade.
+
+Para o GigaVerbo-v2, a fonte candidata e o filtro mínimo já estão documentados,
+mas a ativação ainda depende de orçamento, seed, parâmetros de seleção, revisão
+de licenças e configuração executável explícita.
 
 Antes de fixar esses valores, falta validar o parser dos TSVs completos de
 Adrenaline e OuterSpace, medir o BrWaC com o tokenizer escolhido, definir a

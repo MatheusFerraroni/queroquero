@@ -67,7 +67,7 @@ As decisões atuais de artefatos são:
 | MultiWOZ-PTBR | todos os 17 arquivos `dialogues_001.json` a `dialogues_017.json` |
 | OuterSpace | seu próprio `conversations.zip` |
 | Adrenaline | seu próprio `conversations.zip` |
-| GigaVerbo-v2 | desabilitado por enquanto |
+| GigaVerbo-v2 | candidato remoto documentado; desabilitado por enquanto |
 
 Adrenaline e OuterSpace são datasets distintos e independentes. Cada um terá
 configuração, orçamento, manifesto, métricas e proveniência próprios.
@@ -79,6 +79,10 @@ O inventário, as evidências estruturais e os filtros ainda pendentes estão em
 [docs/datasets/](docs/datasets/README.md). Quantidades de documentos e tokens e
 os filtros finais de qualidade ainda não foram definidos e não devem ser
 inferidos silenciosamente.
+
+As condições específicas de pré-ativação do GigaVerbo-v2 estão registradas em
+[docs/datasets/gigaverbo.md](docs/datasets/gigaverbo.md); essa documentação não
+altera seu estado desabilitado.
 
 ## Acesso externo aos datasets
 
