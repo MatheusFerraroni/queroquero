@@ -1,0 +1,36 @@
+# Keep project instructions versioned even when a parent ignore file excludes them.
+!AGENTS.md
+
+# Local data and environments
+/data/
+/.venv/
+.env
+.env.*
+!.env.example
+
+# Python caches and tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Prepared corpora, manifests and local indexes
+/artifacts/
+/cache/
+/derived/
+/manifests/
+/shards/
+
+# Model and experiment artifacts
+/checkpoints/
+/outputs/
+/runs/
+/wandb/
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+
+# Local-only files
+.DS_Store
