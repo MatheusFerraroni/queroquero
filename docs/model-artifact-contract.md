@@ -1,15 +1,11 @@
-# Contrato de artefato do modelo
+# Contrato do artefato do modelo
 
-Versão do contrato: `tucano2-model-artifact/v1`.
+Versão: `tucano2-model-artifact/v1`.
 
-Este documento define a única interface entre o projeto que refina o Tucano 2
-0.6B e o projeto que executa os experimentos federados. Os projetos não
-compartilham código, dependências, datasets, diretórios de execução nem caminhos
-relativos.
+O produtor e o consumidor compartilham somente este contrato e o diretório
+exportado.
 
-## Baseline padrão
-
-Enquanto o modelo refinado não estiver disponível, o consumidor usa:
+## Baseline
 
 ```yaml
 kind: huggingface
@@ -19,129 +15,77 @@ sequence_length: 1024
 result_variant: upstream_baseline
 ```
 
-A revisão é imutável e identifica o checkpoint final publicado. Não é permitido
-substituí-la silenciosamente por `main`, por uma tag móvel ou pelo checkpoint
-intermediário `step-160000-end-of-stage-2`.
+Revisões móveis e checkpoints intermediários não são aceitos.
 
-## Invariantes de compatibilidade
+## Compatibilidade
 
 O artefato refinado deve:
 
-- usar a mesma arquitetura do Tucano 2 0.6B padrão;
-- manter tokenizer, vocabulário, IDs e special tokens sem alterações;
-- preservar o contexto arquitetural nativo de 4.096 tokens;
-- registrar que preparação e experimentos usam sequências de 1.024 tokens;
-- conter todos os pesos do modelo, não apenas deltas, adapters ou um checkpoint
-  interno do treinador;
-- ser carregável com `AutoModelForCausalLM.from_pretrained()` e
-  `AutoTokenizer.from_pretrained()` apontando somente para o diretório local;
-- usar arquivos `safetensors` para os pesos;
-- permanecer fora do Git.
+- manter arquitetura, tokenizer, vocabulário, IDs e special tokens do baseline;
+- preservar contexto nativo de 4.096 e registrar treino com 1.024 tokens;
+- conter pesos completos em `safetensors`, sem adapters isolados;
+- carregar offline com `AutoModelForCausalLM` e `AutoTokenizer`;
+- permanecer fora do Git e sem symlinks.
 
-No contrato v1, uma mudança de tokenizer, vocabulário, arquitetura ou special
-tokens torna o artefato incompatível e exige uma nova versão do contrato.
+Mudanças de arquitetura ou tokenizer exigem nova versão do contrato.
 
-## Layout do artefato refinado
+## Layout mínimo
 
 ```text
-<model-artifact-dir>/
+<artifact>/
 ├── config.json
 ├── model.safetensors
-│   ou model-00001-of-*.safetensors + model.safetensors.index.json
-├── tokenizer.json ou os arquivos equivalentes do tokenizer
+│   ou shards + model.safetensors.index.json
+├── arquivos do tokenizer
 ├── tokenizer_config.json
 ├── special_tokens_map.json
-├── generation_config.json             # quando produzido pela biblioteca
+├── generation_config.json        # quando gerado
 └── model_artifact_manifest.json
 ```
 
-Arquivos adicionais gerados pelo formato Hugging Face são permitidos desde que
-sejam declarados no manifesto. Symlinks, datasets, métricas detalhadas,
-checkpoints de retomada e caminhos pessoais não pertencem ao artefato.
+Arquivos adicionais são permitidos se declarados no manifesto. Datasets,
+métricas detalhadas e checkpoints de retomada não pertencem ao artefato.
 
-## Manifesto obrigatório
+## Manifesto
 
-`model_artifact_manifest.json` usa UTF-8, chaves em ordem determinística e
-contém, no mínimo:
+`model_artifact_manifest.json` usa UTF-8, chaves determinísticas e contém:
 
-```json
-{
-  "schema_version": "tucano2-model-artifact/v1",
-  "artifact_id": "<identificador-estavel>",
-  "format": "transformers_pretrained",
-  "parent_model": {
-    "model_id": "Polygl0t/Tucano2-0.6B-Base",
-    "revision": "dad97dc864a8f9a1d240fb9351d098f3af9511d7",
-    "license": "Apache-2.0"
-  },
-  "architecture": {
-    "model_type": "<tipo-em-config.json>",
-    "parameter_count": "<inteiro>",
-    "native_context_length": 4096,
-    "training_sequence_length": 1024
-  },
-  "tokenizer": {
-    "fingerprint_sha256": "<sha256>",
-    "vocab_size": "<inteiro>",
-    "bos_token_id": "<inteiro-ou-null>",
-    "eos_token_id": "<inteiro-ou-null>",
-    "pad_token_id": "<inteiro-ou-null>",
-    "unk_token_id": "<inteiro-ou-null>"
-  },
-  "training": {
-    "method": "full_parameter_continual_pretraining",
-    "producer_git_commit": "<sha>",
-    "run_id": "<id>",
-    "seed": "<inteiro>",
-    "resolved_config_sha256": "<sha256>",
-    "dataset_manifest_sha256": "<sha256>"
-  },
-  "environment": {
-    "python": "<versao>",
-    "torch": "<versao>",
-    "transformers": "<versao>",
-    "tokenizers": "<versao>"
-  },
-  "files": [
-    {
-      "path": "<caminho-relativo>",
-      "size_bytes": "<inteiro>",
-      "sha256": "<sha256>"
-    }
-  ],
-  "artifact_sha256": "<sha256-agregado>",
-  "redistribution_status": "internal_research_only"
-}
-```
+| Campo | Conteúdo obrigatório |
+| --- | --- |
+| `schema_version` | `tucano2-model-artifact/v1` |
+| `artifact_id` | identificador estável |
+| `format` | `transformers_pretrained` |
+| `parent_model` | model ID, revisão e licença |
+| `architecture` | model type, parâmetros, contextos 4.096/1.024 |
+| `tokenizer` | fingerprint, vocab size e IDs especiais |
+| `training` | método, commit, run ID, seed e hashes de config/dataset |
+| `environment` | versões de Python, torch, transformers e tokenizers |
+| `files` | path relativo, bytes e SHA-256 de cada arquivo |
+| `artifact_sha256` | hash agregado |
+| `redistribution_status` | `internal_research_only` |
 
-O manifesto não pode conter caminhos absolutos, hosts, usernames, URLs de
-registros dos corpora, textos-fonte nem valores pessoais.
+Regras de hash:
 
-## Fingerprints
+- `files` exclui o manifesto e é ordenado lexicograficamente;
+- cada SHA-256 cobre os bytes exatos do arquivo;
+- o hash agregado cobre a lista ordenada de `path`, `size_bytes` e `sha256`;
+- o fingerprint do tokenizer cobre seus arquivos e IDs especiais;
+- `dataset_manifest_sha256` referencia um manifesto externo.
 
-- `files` lista todos os arquivos regulares do artefato, exceto o próprio
-  manifesto, em ordem lexicográfica pelo caminho relativo.
-- Cada hash usa SHA-256 sobre os bytes exatos do arquivo.
-- `artifact_sha256` usa uma serialização determinística da lista ordenada de
-  `path`, `size_bytes` e `sha256`.
-- O fingerprint do tokenizer cobre todos os seus arquivos declarados e os IDs
-  especiais resolvidos.
-- O hash do dataset manifest referencia o manifesto externo do produtor; o
-  dataset manifest e os dados reais não são copiados para o artefato.
+O manifesto não pode conter caminhos absolutos, hosts, usernames, textos,
+segredos ou valores pessoais.
 
-## Seleção e carregamento pelo consumidor
-
-O consumidor aceita dois modos documentais:
+## Carregamento pelo consumidor
 
 ```yaml
+# baseline
 model:
   kind: huggingface
   model_id: Polygl0t/Tucano2-0.6B-Base
   revision: dad97dc864a8f9a1d240fb9351d098f3af9511d7
   sequence_length: 1024
-```
 
-```yaml
+# refinado
 model:
   kind: local_artifact
   expected_schema: tucano2-model-artifact/v1
@@ -149,44 +93,16 @@ model:
   sequence_length: 1024
 ```
 
-No modo local, o diretório é fornecido futuramente por argumento absoluto de
-execução. O caminho não é versionado e não pode apontar por `..` para outro
-projeto.
+O caminho local é absoluto e fornecido em execução. O consumidor rejeita
+manifesto inválido, hashes divergentes, arquivos ausentes/extras, symlinks,
+tokenizer incompatível, contexto menor que 1.024, adapter isolado ou revisão
+móvel.
 
-Antes de treinar, o consumidor deverá rejeitar:
+## Resultados e distribuição
 
-- manifesto ausente, incompleto ou de versão desconhecida;
-- hash agregado ou hash de arquivo divergente;
-- arquivos obrigatórios ausentes, extras não declarados ou symlinks;
-- arquitetura, vocabulário, tokenizer ou special tokens incompatíveis;
-- contexto menor que 1.024;
-- adapter isolado ou checkpoint que não seja um diretório Hugging Face completo;
-- revisão móvel ou não pinada no modo Hugging Face.
+Baseline e modelo refinado usam variantes distintas. Ao trocar o modelo, os
+experimentos reiniciam sem reutilizar pesos, optimizer ou checkpoints.
 
-## Isolamento dos resultados
-
-Resultados produzidos com o modelo padrão recebem a variante
-`upstream_baseline`. Resultados com o modelo refinado recebem uma variante
-distinta vinculada ao `artifact_sha256`.
-
-Quando o artefato refinado chegar:
-
-- todos os cenários B0 e F0-F5 começam novamente da rodada zero;
-- pesos, estados de optimizer, checkpoints e updates federados do baseline não
-  são reutilizados;
-- a mesma especificação sintética e as mesmas seeds podem ser regeneradas para
-  comparação pareada;
-- resultados do baseline não podem ser apresentados como resultados finais do
-  modelo refinado.
-
-## Distribuição e evolução
-
-A licença Apache-2.0 do modelo pai não determina a permissão de redistribuir
-pesos refinados com os corpora selecionados. O valor padrão permanece
-`internal_research_only` até uma revisão explícita de licenças, termos,
-autorizações e privacidade.
-
-Qualquer mudança incompatível cria uma nova versão do schema. Enquanto as duas
-pastas estiverem no mesmo repositório, as duas cópias deste documento devem ser
-byte a byte idênticas. Depois da separação, uma mudança exige o mesmo número de
-versão e a mesma semântica nos dois repositórios.
+A licença Apache-2.0 do modelo pai não autoriza redistribuição dos pesos
+refinados. O status permanece `internal_research_only` até revisão explícita das
+fontes.

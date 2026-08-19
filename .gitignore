@@ -3,6 +3,8 @@
 
 # Local data and environments
 /data/
+/.remote-datasets/
+/mount_remote.sh
 /.venv/
 .env
 .env.*
