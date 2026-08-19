@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import heapq
+import logging
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional
@@ -13,6 +14,9 @@ from queroquero.datasets.base import (
     ScanResult,
     stable_hash,
 )
+
+
+LOGGER = logging.getLogger("queroquero.datasets.brwac")
 
 
 class BrwacAdapter:
@@ -39,10 +43,20 @@ class BrwacAdapter:
         )
         seed = config["preparation"]["seed"]
 
+        LOGGER.info("stage=archive_index status=started dataset=brwac")
         with zipfile.ZipFile(archive_path, "r") as archive:
+            LOGGER.info(
+                "stage=archive_index status=complete dataset=brwac entries=%d",
+                len(archive.infolist()),
+            )
             fingerprint = _central_directory_fingerprint(archive_path, archive)
             infos = archive.infolist()
             eligible_members = sum(1 for info in infos if _is_document_member(info))
+            LOGGER.info(
+                "stage=member_selection status=started dataset=brwac eligible=%d target=%d",
+                eligible_members,
+                candidate_limit,
+            )
             ranked = heapq.nsmallest(
                 candidate_limit,
                 (info for info in infos if _is_document_member(info)),
@@ -50,6 +64,10 @@ class BrwacAdapter:
                     stable_hash(seed, "brwac", info.filename),
                     info.filename,
                 ),
+            )
+            LOGGER.info(
+                "stage=member_selection status=complete dataset=brwac selected=%d",
+                len(ranked),
             )
 
             cursor = dict(resume_cursor or {})
@@ -71,6 +89,12 @@ class BrwacAdapter:
                     "BrWaC checkpoint documents do not match the resume cursor"
                 )
 
+            LOGGER.info(
+                "stage=document_read status=started dataset=brwac resumed=%d total=%d",
+                start_index,
+                len(ranked),
+            )
+            progress_interval = min(checkpoint_interval, 16)
             for selection_index in range(start_index, len(ranked)):
                 info = ranked[selection_index]
                 try:
@@ -99,6 +123,12 @@ class BrwacAdapter:
                 )
 
                 next_index = selection_index + 1
+                if next_index % progress_interval == 0 or next_index == len(ranked):
+                    LOGGER.info(
+                        "stage=document_read status=progress dataset=brwac documents=%d total=%d",
+                        next_index,
+                        len(ranked),
+                    )
                 if checkpoint and (
                     next_index % checkpoint_interval == 0
                     or next_index == len(ranked)
@@ -111,6 +141,11 @@ class BrwacAdapter:
                         ),
                         list(documents),
                     )
+
+            LOGGER.info(
+                "stage=document_read status=complete dataset=brwac documents=%d",
+                len(documents),
+            )
 
         final_cursor = _cursor(len(ranked), fingerprint["sha256"], complete=True)
         return ScanResult(
@@ -182,12 +217,27 @@ def _central_directory_fingerprint(
     digest.update(b"queroquero-zip-central-directory-v1\0")
     digest.update(archive_size.to_bytes(8, byteorder="big", signed=False))
     infos = archive.infolist()
-    for info in infos:
+    LOGGER.info(
+        "stage=source_fingerprint status=started dataset=brwac entries=%d",
+        len(infos),
+    )
+    for index, info in enumerate(infos, start=1):
         name = info.filename.encode("utf-8", errors="surrogatepass")
         digest.update(len(name).to_bytes(8, byteorder="big", signed=False))
         digest.update(name)
         for value in (info.CRC, info.file_size, info.compress_size):
             digest.update(int(value).to_bytes(8, byteorder="big", signed=False))
+        if index % 100000 == 0:
+            LOGGER.info(
+                "stage=source_fingerprint status=progress dataset=brwac entries=%d total=%d",
+                index,
+                len(infos),
+            )
+
+    LOGGER.info(
+        "stage=source_fingerprint status=complete dataset=brwac entries=%d",
+        len(infos),
+    )
 
     return {
         "method": "zip-central-directory-v1",

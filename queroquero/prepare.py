@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any, Dict
@@ -16,7 +17,7 @@ from .config import (
     PROJECT_ROOT,
     canonical_json_bytes,
     load_resolved_config,
-    resolve_project_path,
+    resolve_output_root,
     scan_config_sha256,
     sha256_bytes,
 )
@@ -36,6 +37,23 @@ from .packing import (
 from .storage import WorkStore, validate_shard, write_split
 
 
+LOGGER = logging.getLogger("queroquero.prepare")
+_PROGRESS_CURSOR_KEYS = (
+    "next_selection_index",
+    "next_member_index",
+    "next_file_index",
+    "next_dialogue_index",
+    "dialogues_seen",
+    "conversations_seen",
+    "messages_seen",
+    "records_seen",
+    "row_number",
+    "documents_selected",
+    "documents_emitted",
+    "complete",
+)
+
+
 class ReviewRequired(RuntimeError):
     exit_code = 20
 
@@ -49,18 +67,48 @@ def load_adapter(name: str) -> Any:
 
 
 def run_preparation(dataset_id: str, profile: str, config_root: Path | None = None) -> Path:
+    LOGGER.info("stage=config status=started dataset=%s profile=%s", dataset_id, profile)
     resolved, resolved_sha256 = load_resolved_config(dataset_id, profile, config_root)
-    output_root = resolve_project_path(resolved["preparation"]["output_root"])
+    output_root = resolve_output_root(resolved["preparation"]["output_root"])
+    LOGGER.info(
+        "stage=config status=complete dataset=%s profile=%s output_root=%s",
+        dataset_id,
+        profile,
+        _project_relative(output_root),
+    )
     work = WorkStore(output_root, dataset_id, scan_config_sha256(resolved))
     resume_cursor, resume_documents = work.load()
+    if resume_cursor is not None:
+        LOGGER.info(
+            "stage=scan status=resumed dataset=%s documents=%d%s",
+            dataset_id,
+            len(resume_documents),
+            _cursor_progress(resume_cursor),
+        )
+
+    def save_checkpoint(cursor: Dict[str, Any], documents: list[Any]) -> None:
+        work.checkpoint(cursor, documents)
+        LOGGER.info(
+            "stage=scan status=checkpoint dataset=%s documents=%d%s",
+            dataset_id,
+            len(documents),
+            _cursor_progress(cursor),
+        )
+
     adapter = load_adapter(resolved["dataset"]["adapter"])
+    LOGGER.info("stage=scan status=started dataset=%s", dataset_id)
     scan = adapter.scan(
         resolved,
         resume_cursor=resume_cursor,
         resume_documents=resume_documents,
-        checkpoint=work.checkpoint,
+        checkpoint=save_checkpoint,
     )
-    work.checkpoint(scan.resume_cursor or scan.cursor, scan.documents)
+    save_checkpoint(scan.resume_cursor or scan.cursor, scan.documents)
+    LOGGER.info(
+        "stage=scan status=complete dataset=%s documents=%d",
+        dataset_id,
+        len(scan.documents),
+    )
 
     tokenizer_config = resolved["preparation"]["tokenizer"]
     tokenizer_identity_sha256 = sha256_bytes(canonical_json_bytes(tokenizer_config))
@@ -70,8 +118,10 @@ def run_preparation(dataset_id: str, profile: str, config_root: Path | None = No
     output_dir = output_root / dataset_id / run_id
     manifest_path = output_dir / "dataset_manifest.json"
     if manifest_path.exists():
+        LOGGER.info("stage=validate status=started dataset=%s existing=true", dataset_id)
         validate_preparation(output_dir)
         work.cleanup()
+        LOGGER.info("stage=validate status=complete dataset=%s existing=true", dataset_id)
         return manifest_path
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -95,11 +145,14 @@ def run_preparation(dataset_id: str, profile: str, config_root: Path | None = No
             f"review {_project_relative(output_dir / 'boilerplate_report.json')}"
         )
 
+    LOGGER.info("stage=tokenizer status=loading dataset=%s", dataset_id)
     tokenizer = _load_pinned_tokenizer(tokenizer_config)
     _validate_loaded_tokenizer(tokenizer)
     tokenizer_sha256 = tokenizer_fingerprint(tokenizer)
+    LOGGER.info("stage=tokenizer status=ready dataset=%s", dataset_id)
 
     min_characters = int(resolved["dataset"]["filters"].get("min_characters", 1))
+    LOGGER.info("stage=tokenize status=started dataset=%s", dataset_id)
     tokenized, tokenization_metrics = clean_deduplicate_and_tokenize(
         scan.documents,
         tokenizer,
@@ -107,6 +160,13 @@ def run_preparation(dataset_id: str, profile: str, config_root: Path | None = No
         seed=resolved["preparation"]["seed"],
         min_characters=min_characters,
     )
+    LOGGER.info(
+        "stage=tokenize status=complete dataset=%s documents=%d duplicates=%d",
+        dataset_id,
+        tokenization_metrics["documents_tokenized"],
+        tokenization_metrics["documents_exact_duplicates"],
+    )
+    LOGGER.info("stage=pack status=started dataset=%s", dataset_id)
     packed = pack_for_budgets(
         tokenized,
         dataset_id=dataset_id,
@@ -115,9 +175,19 @@ def run_preparation(dataset_id: str, profile: str, config_root: Path | None = No
         train_sequences=resolved["profile"]["train_sequences"],
         eval_sequences=resolved["profile"]["eval_sequences"],
     )
+    LOGGER.info(
+        "stage=pack status=complete dataset=%s train_sequences=%d eval_sequences=%d",
+        dataset_id,
+        len(packed.train),
+        len(packed.evaluation),
+    )
     shard_size = resolved["preparation"]["storage"]["sequences_per_shard"]
+    LOGGER.info("stage=write status=started dataset=%s split=train", dataset_id)
     train_shards = write_split(output_dir, "train", packed.train, shard_size)
+    LOGGER.info("stage=write status=complete dataset=%s split=train", dataset_id)
+    LOGGER.info("stage=write status=started dataset=%s split=eval", dataset_id)
     eval_shards = write_split(output_dir, "eval", packed.evaluation, shard_size)
+    LOGGER.info("stage=write status=complete dataset=%s split=eval", dataset_id)
 
     metrics: Dict[str, Any] = {
         "schema_version": METRICS_SCHEMA,
@@ -208,8 +278,10 @@ def run_preparation(dataset_id: str, profile: str, config_root: Path | None = No
     )
     # The manifest is the completion marker and is therefore written last.
     write_json_atomic(manifest_path, manifest)
+    LOGGER.info("stage=validate status=started dataset=%s existing=false", dataset_id)
     validate_preparation(output_dir)
     work.cleanup()
+    LOGGER.info("stage=validate status=complete dataset=%s existing=false", dataset_id)
     print(
         json.dumps(
             {
@@ -504,7 +576,22 @@ def _validate_artifact(
 
 
 def _project_relative(path: Path) -> str:
-    return path.resolve().relative_to(PROJECT_ROOT).as_posix()
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(PROJECT_ROOT).as_posix()
+    except ValueError:
+        return str(resolved)
+
+
+def _cursor_progress(cursor: Dict[str, Any]) -> str:
+    fields = []
+    for key in _PROGRESS_CURSOR_KEYS:
+        value = cursor.get(key)
+        if isinstance(value, (int, bool)) and not (
+            isinstance(value, bool) and key != "complete"
+        ):
+            fields.append(f"{key}={str(value).lower() if isinstance(value, bool) else value}")
+    return "" if not fields else " " + " ".join(fields)
 
 
 def _load_pinned_tokenizer(config: Dict[str, Any]) -> Any:
@@ -574,6 +661,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        datefmt="%H:%M:%S",
+    )
     args = build_parser().parse_args()
     try:
         if args.command == "run":

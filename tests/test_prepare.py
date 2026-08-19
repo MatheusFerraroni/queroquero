@@ -160,7 +160,7 @@ class PreparationIntegrationTests(unittest.TestCase):
                         return_value=(resolved, digest),
                     ),
                     patch(
-                        "queroquero.prepare.resolve_project_path",
+                        "queroquero.prepare.resolve_output_root",
                         return_value=output_root,
                     ),
                     patch("queroquero.prepare.load_adapter", return_value=SyntheticAdapter()),
@@ -222,7 +222,7 @@ class PreparationIntegrationTests(unittest.TestCase):
                     return_value=(resolved, digest),
                 ),
                 patch(
-                    "queroquero.prepare.resolve_project_path",
+                    "queroquero.prepare.resolve_output_root",
                     return_value=output_root,
                 ),
                 patch("queroquero.prepare.load_adapter", return_value=BlockedAdapter()),

@@ -1,16 +1,77 @@
 import json
+import os
 import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
+from unittest.mock import patch
 
-from queroquero.config import ConfigError, load_resolved_config, scan_config_sha256
+from queroquero.config import (
+    ConfigError,
+    load_resolved_config,
+    resolve_output_root,
+    scan_config_sha256,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigTest(unittest.TestCase):
+    def test_output_root_uses_default_relative_or_explicit_absolute_env(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            temporary = Path(temporary_dir).resolve()
+            project = temporary / "project"
+            project.mkdir()
+            external = temporary / "external-output"
+
+            with (
+                patch("queroquero.config.PROJECT_ROOT", project),
+                patch.dict(os.environ, {}, clear=True),
+            ):
+                self.assertEqual(resolve_output_root("derived"), project / "derived")
+
+            with (
+                patch("queroquero.config.PROJECT_ROOT", project),
+                patch.dict(
+                    os.environ,
+                    {"PTBR_OUTPUT_ROOT": "alternate-derived"},
+                    clear=True,
+                ),
+            ):
+                self.assertEqual(
+                    resolve_output_root("derived"), project / "alternate-derived"
+                )
+
+            with (
+                patch("queroquero.config.PROJECT_ROOT", project),
+                patch.dict(
+                    os.environ,
+                    {"PTBR_OUTPUT_ROOT": str(external)},
+                    clear=True,
+                ),
+            ):
+                self.assertEqual(resolve_output_root("derived"), external)
+
+    def test_output_root_rejects_broad_or_dataset_overlapping_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            project = (Path(temporary_dir) / "project").resolve()
+            dataset_root = project / ".remote-datasets"
+            dataset_root.mkdir(parents=True)
+            with (
+                patch("queroquero.config.PROJECT_ROOT", project),
+                patch.dict(
+                    os.environ,
+                    {
+                        "PTBR_DATASET_ROOT": str(dataset_root),
+                        "PTBR_OUTPUT_ROOT": str(dataset_root / "derived"),
+                    },
+                    clear=True,
+                ),
+                self.assertRaisesRegex(ConfigError, "must not overlap"),
+            ):
+                resolve_output_root("derived")
+
     def test_dataset_id_cannot_escape_the_config_or_output_directories(self) -> None:
         with self.assertRaisesRegex(ConfigError, "dataset_id"):
             load_resolved_config("../../outside", "smoke")

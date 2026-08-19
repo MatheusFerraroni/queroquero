@@ -15,6 +15,7 @@ DATASET_SCHEMA = "queroquero-dataset-config/v1"
 RESOLVED_SCHEMA = "queroquero-resolved-preparation/v1"
 MODEL_ID = "Polygl0t/Tucano2-0.6B-Base"
 MODEL_REVISION = "dad97dc864a8f9a1d240fb9351d098f3af9511d7"
+OUTPUT_ROOT_ENV = "PTBR_OUTPUT_ROOT"
 DATASET_IDS = (
     "adrenaline",
     "brwac",
@@ -180,6 +181,49 @@ def resolve_project_path(value: str) -> Path:
     resolved = (PROJECT_ROOT / path).resolve()
     if resolved != PROJECT_ROOT and PROJECT_ROOT not in resolved.parents:
         raise ConfigError(f"project path escapes repository: {value}")
+    return resolved
+
+
+def resolve_output_root(default_value: str) -> Path:
+    """Resolve the local output location without changing preparation identity."""
+
+    raw = os.environ.get(OUTPUT_ROOT_ENV)
+    if raw is None:
+        resolved = resolve_project_path(default_value)
+    else:
+        value = raw.strip()
+        if not value:
+            raise ConfigError(f"environment variable {OUTPUT_ROOT_ENV} cannot be empty")
+        configured = Path(value).expanduser()
+        if configured.is_symlink():
+            raise ConfigError(f"{OUTPUT_ROOT_ENV} must not point to a symlink")
+        resolved = (
+            configured.resolve()
+            if configured.is_absolute()
+            else resolve_project_path(value)
+        )
+
+    unsafe_roots = {
+        Path(resolved.anchor).resolve(),
+        Path.home().resolve(),
+        PROJECT_ROOT.resolve(),
+    }
+    if resolved in unsafe_roots:
+        raise ConfigError(f"{OUTPUT_ROOT_ENV} points to an unsafe broad directory")
+    if resolved.exists() and not resolved.is_dir():
+        raise ConfigError(f"{OUTPUT_ROOT_ENV} must point to a directory")
+
+    dataset_raw = os.environ.get("PTBR_DATASET_ROOT")
+    if dataset_raw:
+        dataset_root = Path(dataset_raw).expanduser().resolve()
+        if (
+            resolved == dataset_root
+            or resolved in dataset_root.parents
+            or dataset_root in resolved.parents
+        ):
+            raise ConfigError(
+                f"{OUTPUT_ROOT_ENV} must not overlap PTBR_DATASET_ROOT"
+            )
     return resolved
 
 

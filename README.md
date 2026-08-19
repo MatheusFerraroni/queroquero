@@ -51,19 +51,27 @@ comuns ficam em `configs/preparation.json`.
 
 ## Instalação
 
-Use Python 3.12 em um ambiente virtual:
+Use Python 3.12 em um ambiente virtual gerenciado pelo `uv`:
 
 ```sh
-python3.12 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -r requirements.txt
 ```
 
-A preparação não depende de PyTorch. Para as cinco fontes locais, informe uma
-raiz somente leitura:
+A preparação não depende de PyTorch. Para as cinco fontes locais, copie o
+arquivo de ambiente e ajuste a raiz somente leitura uma vez:
 
 ```sh
-export PTBR_DATASET_ROOT=/caminho/para/os/datasets
+cp .env.example .env
 ```
+
+`PTBR_OUTPUT_ROOT` é opcional: quando ausente ou definido como `derived`, a
+saída fica no repositório. Um caminho relativo é resolvido a partir do projeto;
+um caminho absoluto permite armazenar os derivados em outro volume. O `.env` é
+local e ignorado pelo Git.
+
+Todos os comandos Python deste projeto passam explicitamente por `uv` e pelo
+interpretador `.venv/bin/python`; não use o Python do sistema.
 
 GigaVerbo é lido por streaming e requer acesso à Hugging Face.
 
@@ -72,10 +80,28 @@ GigaVerbo é lido por streaming e requer acesso à Hugging Face.
 Prepare um dataset e um perfil por vez:
 
 ```sh
-.venv/bin/python -m queroquero.prepare run \
+uv run \
+  --env-file .env \
+  --python .venv/bin/python \
+  -m queroquero.prepare run \
   --dataset brwac \
   --profile smoke
 ```
+
+O progresso é escrito em `stderr` por fase e por checkpoint, sem registrar
+texto, URLs ou identificadores da fonte. O resultado final permanece como JSON
+em `stdout`.
+
+Para executar o perfil `smoke` dos seis datasets em sequência:
+
+```sh
+./scripts/prepare_smoke_all.sh
+```
+
+O script localiza a raiz do projeto automaticamente, carrega `.env` pelo `uv`,
+usa somente `.venv/bin/python` e continua para os demais datasets quando uma
+fonte falha. Ao final, retorna código diferente de zero se houver qualquer
+falha.
 
 Troque `brwac` por qualquer ID da tabela e use `mvp` somente quando a fonte e o
 orçamento local tiverem sido conferidos. O perfil `smoke` serve apenas para
@@ -102,7 +128,10 @@ revalidada e reutilizada.
 Para verificar novamente todos os shards e hashes sem reler a fonte:
 
 ```sh
-.venv/bin/python -m queroquero.prepare validate \
+uv run \
+  --env-file .env \
+  --python .venv/bin/python \
+  -m queroquero.prepare validate \
   --path derived/brwac/<preparation-id>
 ```
 
