@@ -23,6 +23,8 @@ if [[ ! -x .venv/bin/python ]]; then
   exit 1
 fi
 
+export UV_CACHE_DIR="${UV_CACHE_DIR:-${PROJECT_DIR}/cache/uv}"
+
 datasets=(
   brwac
   wackywacky

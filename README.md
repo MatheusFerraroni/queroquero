@@ -92,17 +92,6 @@ O progresso é escrito em `stderr` por fase e por checkpoint, sem registrar
 texto, URLs ou identificadores da fonte. O resultado final permanece como JSON
 em `stdout`.
 
-Para executar o perfil `smoke` dos seis datasets em sequência:
-
-```sh
-./scripts/prepare_smoke_all.sh
-```
-
-O script localiza a raiz do projeto automaticamente, carrega `.env` pelo `uv`,
-usa somente `.venv/bin/python` e continua para os demais datasets quando uma
-fonte falha. Ao final, retorna código diferente de zero se houver qualquer
-falha.
-
 Troque `brwac` por qualquer ID da tabela e use `mvp` somente quando a fonte e o
 orçamento local tiverem sido conferidos. O perfil `smoke` serve apenas para
 validar a engenharia; não é uma amostra de pesquisa.
@@ -134,6 +123,49 @@ uv run \
   -m queroquero.prepare validate \
   --path derived/brwac/<preparation-id>
 ```
+
+## Scripts auxiliares
+
+A pasta `scripts/` contém os comandos locais de preparação e inspeção. Ambos
+localizam a raiz do projeto automaticamente, carregam `.env` pelo `uv`, usam
+somente `.venv/bin/python` e mantêm o cache do `uv` em `cache/uv` por padrão.
+
+| Script | Finalidade |
+| --- | --- |
+| `scripts/prepare_smoke_all.sh` | Executar o perfil `smoke` dos seis datasets, medir cada duração e continuar quando uma fonte falhar. |
+| `scripts/inspect_preparation.sh` | Validar uma preparação e resumir schema, shards, compressão, contagens e métricas sem imprimir conteúdo. |
+| `scripts/inspect_preparation.py` | Implementação Python do inspetor; normalmente é chamada pelo wrapper `.sh`. |
+
+Execute todos os smoke tests de preparação:
+
+```sh
+./scripts/prepare_smoke_all.sh
+```
+
+O comando retorna código diferente de zero ao final caso qualquer dataset
+falhe. Execuções interrompidas podem continuar dos checkpoints compatíveis.
+
+Para validar e inspecionar schema, contagens, compressão, proveniência agregada
+e métricas em um único relatório seguro:
+
+```sh
+./scripts/inspect_preparation.sh derived/brwac/<preparation-id>
+```
+
+O inspetor não imprime texto nem hashes de documentos por padrão. Para uma
+avaliação linguística local e explícita, é possível decodificar uma única
+sequência:
+
+```sh
+./scripts/inspect_preparation.sh \
+  derived/brwac/<preparation-id> \
+  --decode-sample \
+  --split train \
+  --row 0
+```
+
+O conteúdo decodificado é dado real e não deve ser copiado para logs, testes,
+commits ou documentação.
 
 ## Revisão de boilerplate do WackyWacky
 
