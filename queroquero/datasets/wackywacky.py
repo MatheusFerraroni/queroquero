@@ -48,7 +48,11 @@ _TRUNCATED_ZSTD_FRAME_SIZE_BYTES = 65_535
 _ZSTD_DECOMPRESSOR = zstd.ZstdDecompressor()
 
 
-class _TruncatedZstdFrameError(ValueError):
+class _CorruptZstdFrameError(ValueError):
+    """A corrupt frame with a recognized header that is safe to discard."""
+
+
+class _TruncatedZstdFrameError(_CorruptZstdFrameError):
     """A known source truncation that is safe to discard per configuration."""
 
 
@@ -113,6 +117,7 @@ class WackyWackyAdapter:
             "source.max_decompressed_text_bytes",
         )
         truncated_zstd_frame_size = _truncated_zstd_frame_size(source)
+        discard_corrupt_zstd_frames = _discard_corrupt_zstd_frames(source)
         sample_bytes = _positive_int(
             source.get("fingerprint_sample_bytes", 64 * 1024),
             "source.fingerprint_sample_bytes",
@@ -209,6 +214,7 @@ class WackyWackyAdapter:
                         metrics=metrics,
                         maximum_text_bytes=max_decompressed_text_bytes,
                         truncated_zstd_frame_size=truncated_zstd_frame_size,
+                        discard_corrupt_zstd_frames=discard_corrupt_zstd_frames,
                     )
                     if document is not None:
                         metrics["eligible_records"] += 1
@@ -400,6 +406,7 @@ def _validate_config(
         "source.max_decompressed_text_bytes",
     )
     _truncated_zstd_frame_size(source)
+    _discard_corrupt_zstd_frames(source)
     if filters.get("status") != "done":
         raise ConfigError("WackyWacky filters.status must be 'done'")
     for name in ("require_text", "require_text_md5", "exclude_same_as"):
@@ -493,6 +500,7 @@ def _eligible_document(
     metrics: Dict[str, int],
     maximum_text_bytes: int,
     truncated_zstd_frame_size: int,
+    discard_corrupt_zstd_frames: bool,
 ) -> Optional[Document]:
     if record["status"].strip() != filters.get("status", "done"):
         metrics["filtered_status"] += 1
@@ -521,9 +529,13 @@ def _eligible_document(
             text_md5,
             maximum_bytes=maximum_text_bytes,
             truncated_zstd_frame_size=truncated_zstd_frame_size,
+            discard_corrupt_zstd_frames=discard_corrupt_zstd_frames,
         )
     except _TruncatedZstdFrameError:
         metrics["filtered_truncated_zstd_frames_65535_bytes"] += 1
+        return None
+    except _CorruptZstdFrameError:
+        metrics["filtered_corrupt_zstd_frames"] += 1
         return None
     if not text_md5_matches:
         metrics["text_md5_mismatches"] += 1
@@ -660,6 +672,7 @@ def _decode_text(
     text_md5: str,
     maximum_bytes: int,
     truncated_zstd_frame_size: int,
+    discard_corrupt_zstd_frames: bool,
 ) -> tuple[str, bool]:
     if not _MD5_RE.fullmatch(text_md5):
         raise ValueError("WackyWacky text_md5 is not a valid MD5 digest")
@@ -692,6 +705,13 @@ def _decode_text(
         ):
             raise _TruncatedZstdFrameError(
                 "WackyWacky text contains a configured truncated Zstandard frame"
+            ) from None
+        if (
+            discard_corrupt_zstd_frames
+            and compressed.startswith(_ZSTD_FRAME_MAGIC)
+        ):
+            raise _CorruptZstdFrameError(
+                "WackyWacky text contains a corrupt Zstandard frame"
             ) from None
         raise ValueError("WackyWacky text is not a valid Zstandard frame") from None
     if len(decoded_bytes) > maximum_bytes:
@@ -1418,6 +1438,7 @@ def _resume_metrics(value: Any) -> Dict[str, int]:
         "filtered_page_search": 0,
         "filtered_page_listing": 0,
         "filtered_truncated_zstd_frames_65535_bytes": 0,
+        "filtered_corrupt_zstd_frames": 0,
         "text_md5_mismatches": 0,
         "selected_documents": 0,
         "short_lines_considered": 0,
@@ -1446,6 +1467,15 @@ def _truncated_zstd_frame_size(source: Dict[str, Any]) -> int:
     if value != _TRUNCATED_ZSTD_FRAME_SIZE_BYTES:
         raise ConfigError(
             "source.discard_truncated_zstd_frame_size_bytes must be 65535"
+        )
+    return value
+
+
+def _discard_corrupt_zstd_frames(source: Dict[str, Any]) -> bool:
+    value = source.get("discard_corrupt_zstd_frames_with_valid_header")
+    if value is not True:
+        raise ConfigError(
+            "source.discard_corrupt_zstd_frames_with_valid_header must be true"
         )
     return value
 

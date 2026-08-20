@@ -194,8 +194,9 @@ Depois da normalização, o WackyWacky remove globalmente cada linha não vazia
 com menos de 40 caracteres, inclusive quando um documento contém várias
 quebras de linha. Páginas identificadas como busca, categoria, tag ou arquivo
 são descartadas antes da descompactação usando somente título e URL em memória.
-Frames Zstandard truncados no tamanho conhecido de 65.535 bytes também são
-descartados e contabilizados, sem registrar campos do registro.
+Frames Zstandard truncados no tamanho conhecido de 65.535 bytes e outros frames
+com cabeçalho reconhecido, mas descompressão corrompida, são descartados em
+métricas separadas, sem registrar campos do registro.
 
 Depois dos filtros, documentos afetados são descartados quando restam menos de
 300 caracteres ou quando mais de 80% do texto normalizado foi removido. A troca

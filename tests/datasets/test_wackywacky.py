@@ -42,6 +42,7 @@ def resolved_config(
                 "text_encoding": "hex-zstd-utf8",
                 "max_decompressed_text_bytes": 1024 * 1024,
                 "discard_truncated_zstd_frame_size_bytes": 65535,
+                "discard_corrupt_zstd_frames_with_valid_header": True,
                 "columns": list(_EXPECTED_COLUMNS),
                 "max_field_size_bytes": 1024 * 1024,
                 "checkpoint_interval_records": checkpoint_interval,
@@ -281,6 +282,39 @@ class WackyWackyAdapterTests(unittest.TestCase):
         self.assertEqual(
             result.metrics["filtered_truncated_zstd_frames_65535_bytes"],
             1,
+        )
+        self.assertEqual(result.metrics["filtered_corrupt_zstd_frames"], 0)
+
+    def test_discards_and_counts_other_corrupt_zstd_frame(self) -> None:
+        raw_bytes = b"A" * 1_367
+        compressed = zstd.ZstdCompressor(level=1).compress(raw_bytes)
+        corrupt = compressed[:-1]
+        self.assertNotEqual(len(corrupt), 65_535)
+        self.assertEqual(zstd.frame_content_size(corrupt), len(raw_bytes))
+
+        corrupt_record = record(1, "conteúdo sintético substituído")
+        corrupt_record["text"] = corrupt.hex()
+        corrupt_record["text_md5"] = hashlib.md5(
+            raw_bytes, usedforsecurity=False
+        ).hexdigest()
+        write_tsv(
+            self.source,
+            [corrupt_record, record(2, "registro sintético válido")],
+        )
+
+        result = WackyWackyAdapter().scan(
+            resolved_config(candidate_documents=1)
+        )
+
+        self.assertEqual(
+            [document.text for document in result.documents],
+            ["registro sintético válido"],
+        )
+        self.assertEqual(result.metrics["rows_seen"], 2)
+        self.assertEqual(result.metrics["filtered_corrupt_zstd_frames"], 1)
+        self.assertEqual(
+            result.metrics["filtered_truncated_zstd_frames_65535_bytes"],
+            0,
         )
 
     def test_rejects_decompressed_text_above_configured_limit(self) -> None:
