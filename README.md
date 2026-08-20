@@ -137,12 +137,19 @@ somente `.venv/bin/python` e mantêm o cache do `uv` em `cache/uv` por padrão.
 | --- | --- |
 | `scripts/prepare_smoke_all.sh` | Executar o perfil `smoke` dos seis datasets, medir cada duração e continuar quando uma fonte falhar. |
 | `scripts/inspect_preparation.sh` | Validar uma preparação e resumir schema, shards, compressão, contagens e métricas sem imprimir conteúdo. |
+| `scripts/inspect_smoke_all.sh` | Localizar o smoke mais recente de cada dataset e decodificar a row 0 do split de treino. |
 | `scripts/inspect_preparation.py` | Implementação Python do inspetor; normalmente é chamada pelo wrapper `.sh`. |
 
 Execute todos os smoke tests de preparação:
 
 ```sh
 ./scripts/prepare_smoke_all.sh
+```
+
+Para inspecionar e decodificar a primeira sequência de treino dos seis smokes:
+
+```bash
+./scripts/inspect_smoke_all.sh
 ```
 
 O comando retorna código diferente de zero ao final caso qualquer dataset

@@ -40,7 +40,7 @@ for dataset in "${datasets[@]}"; do
   echo
   echo "===== Iniciando: ${dataset} ====="
 
-  if /usr/bin/time -p uv run \
+  if time -p uv run \
     --env-file .env \
     --python .venv/bin/python \
     -m queroquero.prepare run \
