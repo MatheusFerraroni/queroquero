@@ -197,6 +197,8 @@ são descartadas antes da descompactação usando somente título e URL em memó
 Frames Zstandard truncados no tamanho conhecido de 65.535 bytes e outros frames
 com cabeçalho reconhecido, mas descompressão corrompida, são descartados em
 métricas separadas, sem registrar campos do registro.
+Saídas descomprimidas que não passam pela decodificação UTF-8 estrita também são
+descartadas integralmente e contabilizadas; bytes inválidos nunca são substituídos.
 
 Depois dos filtros, documentos afetados são descartados quando restam menos de
 300 caracteres ou quando mais de 80% do texto normalizado foi removido. A troca

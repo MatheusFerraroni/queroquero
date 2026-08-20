@@ -56,6 +56,10 @@ class _TruncatedZstdFrameError(_CorruptZstdFrameError):
     """A known source truncation that is safe to discard per configuration."""
 
 
+class _NonUtf8DecompressedTextError(ValueError):
+    """Decompressed source bytes that fail strict UTF-8 decoding."""
+
+
 @dataclass(frozen=True)
 class _NormalizedParagraph:
     lines: Tuple[str, ...]
@@ -118,6 +122,7 @@ class WackyWackyAdapter:
         )
         truncated_zstd_frame_size = _truncated_zstd_frame_size(source)
         discard_corrupt_zstd_frames = _discard_corrupt_zstd_frames(source)
+        discard_non_utf8_text = _discard_non_utf8_decompressed_text(source)
         sample_bytes = _positive_int(
             source.get("fingerprint_sample_bytes", 64 * 1024),
             "source.fingerprint_sample_bytes",
@@ -215,6 +220,7 @@ class WackyWackyAdapter:
                         maximum_text_bytes=max_decompressed_text_bytes,
                         truncated_zstd_frame_size=truncated_zstd_frame_size,
                         discard_corrupt_zstd_frames=discard_corrupt_zstd_frames,
+                        discard_non_utf8_text=discard_non_utf8_text,
                     )
                     if document is not None:
                         metrics["eligible_records"] += 1
@@ -407,6 +413,7 @@ def _validate_config(
     )
     _truncated_zstd_frame_size(source)
     _discard_corrupt_zstd_frames(source)
+    _discard_non_utf8_decompressed_text(source)
     if filters.get("status") != "done":
         raise ConfigError("WackyWacky filters.status must be 'done'")
     for name in ("require_text", "require_text_md5", "exclude_same_as"):
@@ -501,6 +508,7 @@ def _eligible_document(
     maximum_text_bytes: int,
     truncated_zstd_frame_size: int,
     discard_corrupt_zstd_frames: bool,
+    discard_non_utf8_text: bool,
 ) -> Optional[Document]:
     if record["status"].strip() != filters.get("status", "done"):
         metrics["filtered_status"] += 1
@@ -530,12 +538,16 @@ def _eligible_document(
             maximum_bytes=maximum_text_bytes,
             truncated_zstd_frame_size=truncated_zstd_frame_size,
             discard_corrupt_zstd_frames=discard_corrupt_zstd_frames,
+            discard_non_utf8_text=discard_non_utf8_text,
         )
     except _TruncatedZstdFrameError:
         metrics["filtered_truncated_zstd_frames_65535_bytes"] += 1
         return None
     except _CorruptZstdFrameError:
         metrics["filtered_corrupt_zstd_frames"] += 1
+        return None
+    except _NonUtf8DecompressedTextError:
+        metrics["filtered_non_utf8_decompressed_texts"] += 1
         return None
     if not text_md5_matches:
         metrics["text_md5_mismatches"] += 1
@@ -673,6 +685,7 @@ def _decode_text(
     maximum_bytes: int,
     truncated_zstd_frame_size: int,
     discard_corrupt_zstd_frames: bool,
+    discard_non_utf8_text: bool,
 ) -> tuple[str, bool]:
     if not _MD5_RE.fullmatch(text_md5):
         raise ValueError("WackyWacky text_md5 is not a valid MD5 digest")
@@ -723,6 +736,10 @@ def _decode_text(
     try:
         decoded = decoded_bytes.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
+        if discard_non_utf8_text:
+            raise _NonUtf8DecompressedTextError(
+                "WackyWacky decompressed text is not strict UTF-8"
+            ) from None
         raise ValueError("WackyWacky decompressed text is not strict UTF-8") from None
     return decoded, text_md5_matches
 
@@ -1439,6 +1456,7 @@ def _resume_metrics(value: Any) -> Dict[str, int]:
         "filtered_page_listing": 0,
         "filtered_truncated_zstd_frames_65535_bytes": 0,
         "filtered_corrupt_zstd_frames": 0,
+        "filtered_non_utf8_decompressed_texts": 0,
         "text_md5_mismatches": 0,
         "selected_documents": 0,
         "short_lines_considered": 0,
@@ -1476,6 +1494,15 @@ def _discard_corrupt_zstd_frames(source: Dict[str, Any]) -> bool:
     if value is not True:
         raise ConfigError(
             "source.discard_corrupt_zstd_frames_with_valid_header must be true"
+        )
+    return value
+
+
+def _discard_non_utf8_decompressed_text(source: Dict[str, Any]) -> bool:
+    value = source.get("discard_non_utf8_decompressed_text")
+    if value is not True:
+        raise ConfigError(
+            "source.discard_non_utf8_decompressed_text must be true"
         )
     return value
 

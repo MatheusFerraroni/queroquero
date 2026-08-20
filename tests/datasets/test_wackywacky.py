@@ -43,6 +43,7 @@ def resolved_config(
                 "max_decompressed_text_bytes": 1024 * 1024,
                 "discard_truncated_zstd_frame_size_bytes": 65535,
                 "discard_corrupt_zstd_frames_with_valid_header": True,
+                "discard_non_utf8_decompressed_text": True,
                 "columns": list(_EXPECTED_COLUMNS),
                 "max_field_size_bytes": 1024 * 1024,
                 "checkpoint_interval_records": checkpoint_interval,
@@ -221,7 +222,9 @@ class WackyWackyAdapterTests(unittest.TestCase):
             self.assertNotIn("private-record", document.source_ref)
             self.assertNotIn("domain-a", repr(document.metadata))
 
-    def test_rejects_invalid_hexadecimal_zstd_utf8_and_md5(self) -> None:
+    def test_rejects_invalid_hexadecimal_and_zstd_but_counts_md5_mismatch(
+        self,
+    ) -> None:
         invalid_hex = record(1, "Texto")
         invalid_hex["text"] = "não-hexadecimal"
         write_tsv(self.source, [invalid_hex])
@@ -234,8 +237,16 @@ class WackyWackyAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not a valid Zstandard frame"):
             WackyWackyAdapter().scan(resolved_config(candidate_documents=1))
 
-        invalid_utf8_bytes = b"\xff"
-        invalid_utf8 = record(3, "Texto")
+        mismatched_md5 = record(4, "Texto")
+        mismatched_md5["text_md5"] = "0" * 32
+        write_tsv(self.source, [mismatched_md5])
+        result = WackyWackyAdapter().scan(resolved_config(candidate_documents=1))
+        self.assertEqual([document.text for document in result.documents], ["Texto"])
+        self.assertEqual(result.metrics["text_md5_mismatches"], 1)
+
+    def test_discards_and_counts_non_utf8_decompressed_text(self) -> None:
+        invalid_utf8_bytes = b"prefixo-sintetico\xffsufixo-sintetico"
+        invalid_utf8 = record(1, "conteúdo sintético substituído")
         invalid_utf8["text"] = (
             zstd.ZstdCompressor(level=1)
             .compress(invalid_utf8_bytes)
@@ -244,16 +255,29 @@ class WackyWackyAdapterTests(unittest.TestCase):
         invalid_utf8["text_md5"] = hashlib.md5(
             invalid_utf8_bytes, usedforsecurity=False
         ).hexdigest()
-        write_tsv(self.source, [invalid_utf8])
-        with self.assertRaisesRegex(ValueError, "not strict UTF-8"):
-            WackyWackyAdapter().scan(resolved_config(candidate_documents=1))
+        write_tsv(
+            self.source,
+            [invalid_utf8, record(2, "registro sintético válido")],
+        )
 
-        mismatched_md5 = record(4, "Texto")
-        mismatched_md5["text_md5"] = "0" * 32
-        write_tsv(self.source, [mismatched_md5])
-        result = WackyWackyAdapter().scan(resolved_config(candidate_documents=1))
-        self.assertEqual([document.text for document in result.documents], ["Texto"])
-        self.assertEqual(result.metrics["text_md5_mismatches"], 1)
+        result = WackyWackyAdapter().scan(
+            resolved_config(candidate_documents=1)
+        )
+
+        self.assertEqual(
+            [document.text for document in result.documents],
+            ["registro sintético válido"],
+        )
+        self.assertEqual(result.metrics["rows_seen"], 2)
+        self.assertEqual(
+            result.metrics["filtered_non_utf8_decompressed_texts"],
+            1,
+        )
+        self.assertEqual(result.metrics["filtered_corrupt_zstd_frames"], 0)
+        self.assertEqual(
+            result.metrics["filtered_truncated_zstd_frames_65535_bytes"],
+            0,
+        )
 
     def test_discards_and_counts_configured_truncated_zstd_frame(self) -> None:
         raw_bytes = random.Random(42).randbytes(100_000)
