@@ -42,8 +42,7 @@ def resolved_config(
                 "text_encoding": "hex-zstd-utf8",
                 "max_decompressed_text_bytes": 1024 * 1024,
                 "discard_truncated_zstd_frame_size_bytes": 65535,
-                "discard_corrupt_zstd_frames_with_valid_header": True,
-                "discard_non_utf8_decompressed_text": True,
+                "text_decode_error_policy": "discard",
                 "columns": list(_EXPECTED_COLUMNS),
                 "max_field_size_bytes": 1024 * 1024,
                 "checkpoint_interval_records": checkpoint_interval,
@@ -222,20 +221,33 @@ class WackyWackyAdapterTests(unittest.TestCase):
             self.assertNotIn("private-record", document.source_ref)
             self.assertNotIn("domain-a", repr(document.metadata))
 
-    def test_rejects_invalid_hexadecimal_and_zstd_but_counts_md5_mismatch(
-        self,
-    ) -> None:
+    def test_discards_text_decode_errors_by_reason_and_continues(self) -> None:
         invalid_hex = record(1, "Texto")
         invalid_hex["text"] = "não-hexadecimal"
-        write_tsv(self.source, [invalid_hex])
-        with self.assertRaisesRegex(ValueError, "not valid hexadecimal"):
-            WackyWackyAdapter().scan(resolved_config(candidate_documents=1))
-
         invalid_zstd = record(2, "Texto")
         invalid_zstd["text"] = b"not-zstd".hex()
-        write_tsv(self.source, [invalid_zstd])
-        with self.assertRaisesRegex(ValueError, "not a valid Zstandard frame"):
-            WackyWackyAdapter().scan(resolved_config(candidate_documents=1))
+        invalid_md5 = record(3, "Texto", text_md5="not-an-md5")
+
+        cases = (
+            (invalid_hex, "filtered_invalid_text_hex"),
+            (invalid_zstd, "filtered_invalid_zstd_frames"),
+            (invalid_md5, "filtered_invalid_text_md5"),
+        )
+        for invalid_record, expected_metric in cases:
+            with self.subTest(metric=expected_metric):
+                write_tsv(
+                    self.source,
+                    [invalid_record, record(10, "registro sintético válido")],
+                )
+                result = WackyWackyAdapter().scan(
+                    resolved_config(candidate_documents=1)
+                )
+                self.assertEqual(
+                    [document.text for document in result.documents],
+                    ["registro sintético válido"],
+                )
+                self.assertEqual(result.metrics["rows_seen"], 2)
+                self.assertEqual(result.metrics[expected_metric], 1)
 
         mismatched_md5 = record(4, "Texto")
         mismatched_md5["text_md5"] = "0" * 32
@@ -341,13 +353,38 @@ class WackyWackyAdapterTests(unittest.TestCase):
             0,
         )
 
-    def test_rejects_decompressed_text_above_configured_limit(self) -> None:
-        write_tsv(self.source, [record(1, "A" * 1024)])
+    def test_discards_decompressed_text_above_configured_limit(self) -> None:
+        write_tsv(
+            self.source,
+            [record(1, "A" * 1024), record(2, "registro sintético válido")],
+        )
         config = resolved_config(candidate_documents=1)
         config["dataset"]["source"]["max_decompressed_text_bytes"] = 128
 
-        with self.assertRaisesRegex(ValueError, "exceeds the size limit"):
-            WackyWackyAdapter().scan(config)
+        result = WackyWackyAdapter().scan(config)
+
+        self.assertEqual(
+            [document.text for document in result.documents],
+            ["registro sintético válido"],
+        )
+        self.assertEqual(result.metrics["filtered_oversized_decompressed_texts"], 1)
+
+    def test_structural_row_errors_and_programming_errors_remain_fatal(self) -> None:
+        self.source.parent.mkdir(parents=True, exist_ok=True)
+        self.source.write_bytes(
+            ("\t".join(_EXPECTED_COLUMNS) + "\n").encode("utf-8")
+            + b"only-two\tfields\n"
+        )
+        with self.assertRaisesRegex(ValueError, "does not have 19 columns"):
+            WackyWackyAdapter().scan(resolved_config(candidate_documents=1))
+
+        write_tsv(self.source, [record(1, "registro sintético válido")])
+        with patch(
+            "queroquero.datasets.wackywacky._decode_text",
+            side_effect=RuntimeError("synthetic programming error"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "synthetic programming error"):
+                WackyWackyAdapter().scan(resolved_config(candidate_documents=1))
 
     def test_filters_search_and_listing_pages_without_exposing_page_values(self) -> None:
         rows = [

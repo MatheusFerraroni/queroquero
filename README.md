@@ -194,11 +194,11 @@ Depois da normalização, o WackyWacky remove globalmente cada linha não vazia
 com menos de 40 caracteres, inclusive quando um documento contém várias
 quebras de linha. Páginas identificadas como busca, categoria, tag ou arquivo
 são descartadas antes da descompactação usando somente título e URL em memória.
-Frames Zstandard truncados no tamanho conhecido de 65.535 bytes e outros frames
-com cabeçalho reconhecido, mas descompressão corrompida, são descartados em
-métricas separadas, sem registrar campos do registro.
-Saídas descomprimidas que não passam pela decodificação UTF-8 estrita também são
-descartadas integralmente e contabilizadas; bytes inválidos nunca são substituídos.
+Falhas limitadas ao campo `text` — MD5 ou hexadecimal inválido, payload vazio,
+frame Zstandard inválido ou corrompido, limite descomprimido excedido e saída
+não UTF-8 — descartam apenas o registro e são contabilizadas por motivo. O TSV
+continua estrito, bytes inválidos nunca são substituídos e nenhum campo do
+registro é escrito nos logs.
 
 Depois dos filtros, documentos afetados são descartados quando restam menos de
 300 caracteres ou quando mais de 80% do texto normalizado foi removido. A troca

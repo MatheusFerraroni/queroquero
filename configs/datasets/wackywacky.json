@@ -10,8 +10,7 @@
     "text_encoding": "hex-zstd-utf8",
     "max_decompressed_text_bytes": 134217728,
     "discard_truncated_zstd_frame_size_bytes": 65535,
-    "discard_corrupt_zstd_frames_with_valid_header": true,
-    "discard_non_utf8_decompressed_text": true,
+    "text_decode_error_policy": "discard",
     "columns": [
       "id",
       "domain_id",

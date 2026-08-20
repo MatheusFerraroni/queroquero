@@ -48,16 +48,12 @@ _TRUNCATED_ZSTD_FRAME_SIZE_BYTES = 65_535
 _ZSTD_DECOMPRESSOR = zstd.ZstdDecompressor()
 
 
-class _CorruptZstdFrameError(ValueError):
-    """A corrupt frame with a recognized header that is safe to discard."""
+class _TextDecodeError(ValueError):
+    """A bounded source-record defect with a safe aggregate metric."""
 
-
-class _TruncatedZstdFrameError(_CorruptZstdFrameError):
-    """A known source truncation that is safe to discard per configuration."""
-
-
-class _NonUtf8DecompressedTextError(ValueError):
-    """Decompressed source bytes that fail strict UTF-8 decoding."""
+    def __init__(self, metric: str) -> None:
+        super().__init__("WackyWacky text field was rejected")
+        self.metric = metric
 
 
 @dataclass(frozen=True)
@@ -121,8 +117,6 @@ class WackyWackyAdapter:
             "source.max_decompressed_text_bytes",
         )
         truncated_zstd_frame_size = _truncated_zstd_frame_size(source)
-        discard_corrupt_zstd_frames = _discard_corrupt_zstd_frames(source)
-        discard_non_utf8_text = _discard_non_utf8_decompressed_text(source)
         sample_bytes = _positive_int(
             source.get("fingerprint_sample_bytes", 64 * 1024),
             "source.fingerprint_sample_bytes",
@@ -219,8 +213,6 @@ class WackyWackyAdapter:
                         metrics=metrics,
                         maximum_text_bytes=max_decompressed_text_bytes,
                         truncated_zstd_frame_size=truncated_zstd_frame_size,
-                        discard_corrupt_zstd_frames=discard_corrupt_zstd_frames,
-                        discard_non_utf8_text=discard_non_utf8_text,
                     )
                     if document is not None:
                         metrics["eligible_records"] += 1
@@ -412,8 +404,7 @@ def _validate_config(
         "source.max_decompressed_text_bytes",
     )
     _truncated_zstd_frame_size(source)
-    _discard_corrupt_zstd_frames(source)
-    _discard_non_utf8_decompressed_text(source)
+    _text_decode_error_policy(source)
     if filters.get("status") != "done":
         raise ConfigError("WackyWacky filters.status must be 'done'")
     for name in ("require_text", "require_text_md5", "exclude_same_as"):
@@ -507,8 +498,6 @@ def _eligible_document(
     metrics: Dict[str, int],
     maximum_text_bytes: int,
     truncated_zstd_frame_size: int,
-    discard_corrupt_zstd_frames: bool,
-    discard_non_utf8_text: bool,
 ) -> Optional[Document]:
     if record["status"].strip() != filters.get("status", "done"):
         metrics["filtered_status"] += 1
@@ -537,17 +526,9 @@ def _eligible_document(
             text_md5,
             maximum_bytes=maximum_text_bytes,
             truncated_zstd_frame_size=truncated_zstd_frame_size,
-            discard_corrupt_zstd_frames=discard_corrupt_zstd_frames,
-            discard_non_utf8_text=discard_non_utf8_text,
         )
-    except _TruncatedZstdFrameError:
-        metrics["filtered_truncated_zstd_frames_65535_bytes"] += 1
-        return None
-    except _CorruptZstdFrameError:
-        metrics["filtered_corrupt_zstd_frames"] += 1
-        return None
-    except _NonUtf8DecompressedTextError:
-        metrics["filtered_non_utf8_decompressed_texts"] += 1
+    except _TextDecodeError as exc:
+        metrics[exc.metric] += 1
         return None
     if not text_md5_matches:
         metrics["text_md5_mismatches"] += 1
@@ -684,28 +665,26 @@ def _decode_text(
     text_md5: str,
     maximum_bytes: int,
     truncated_zstd_frame_size: int,
-    discard_corrupt_zstd_frames: bool,
-    discard_non_utf8_text: bool,
 ) -> tuple[str, bool]:
     if not _MD5_RE.fullmatch(text_md5):
-        raise ValueError("WackyWacky text_md5 is not a valid MD5 digest")
+        raise _TextDecodeError("filtered_invalid_text_md5")
     try:
         compressed = bytes.fromhex(encoded)
     except ValueError:
-        raise ValueError("WackyWacky text is not valid hexadecimal") from None
+        raise _TextDecodeError("filtered_invalid_text_hex") from None
     if not compressed:
-        raise ValueError("WackyWacky text contains an empty compressed payload")
+        raise _TextDecodeError("filtered_empty_compressed_texts")
     try:
         declared_size = zstd.frame_content_size(compressed)
     except zstd.ZstdError:
-        raise ValueError("WackyWacky text is not a valid Zstandard frame") from None
+        raise _TextDecodeError("filtered_invalid_zstd_frames") from None
     if declared_size == zstd.CONTENTSIZE_ERROR:
-        raise ValueError("WackyWacky text is not a valid Zstandard frame")
+        raise _TextDecodeError("filtered_invalid_zstd_frames")
     if (
         declared_size != zstd.CONTENTSIZE_UNKNOWN
         and declared_size > maximum_bytes
     ):
-        raise ValueError("WackyWacky decompressed text exceeds the size limit")
+        raise _TextDecodeError("filtered_oversized_decompressed_texts")
     try:
         decoded_bytes = _ZSTD_DECOMPRESSOR.decompress(
             compressed,
@@ -716,19 +695,14 @@ def _decode_text(
             len(compressed) == truncated_zstd_frame_size
             and compressed.startswith(_ZSTD_FRAME_MAGIC)
         ):
-            raise _TruncatedZstdFrameError(
-                "WackyWacky text contains a configured truncated Zstandard frame"
+            raise _TextDecodeError(
+                "filtered_truncated_zstd_frames_65535_bytes"
             ) from None
-        if (
-            discard_corrupt_zstd_frames
-            and compressed.startswith(_ZSTD_FRAME_MAGIC)
-        ):
-            raise _CorruptZstdFrameError(
-                "WackyWacky text contains a corrupt Zstandard frame"
-            ) from None
-        raise ValueError("WackyWacky text is not a valid Zstandard frame") from None
+        if compressed.startswith(_ZSTD_FRAME_MAGIC):
+            raise _TextDecodeError("filtered_corrupt_zstd_frames") from None
+        raise _TextDecodeError("filtered_invalid_zstd_frames") from None
     if len(decoded_bytes) > maximum_bytes:
-        raise ValueError("WackyWacky decompressed text exceeds the size limit")
+        raise _TextDecodeError("filtered_oversized_decompressed_texts")
     text_md5_matches = (
         hashlib.md5(decoded_bytes, usedforsecurity=False).hexdigest()
         == text_md5.lower()
@@ -736,11 +710,7 @@ def _decode_text(
     try:
         decoded = decoded_bytes.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
-        if discard_non_utf8_text:
-            raise _NonUtf8DecompressedTextError(
-                "WackyWacky decompressed text is not strict UTF-8"
-            ) from None
-        raise ValueError("WackyWacky decompressed text is not strict UTF-8") from None
+        raise _TextDecodeError("filtered_non_utf8_decompressed_texts") from None
     return decoded, text_md5_matches
 
 
@@ -1454,8 +1424,13 @@ def _resume_metrics(value: Any) -> Dict[str, int]:
         "filtered_same_as": 0,
         "filtered_page_search": 0,
         "filtered_page_listing": 0,
+        "filtered_invalid_text_md5": 0,
+        "filtered_invalid_text_hex": 0,
+        "filtered_empty_compressed_texts": 0,
+        "filtered_invalid_zstd_frames": 0,
         "filtered_truncated_zstd_frames_65535_bytes": 0,
         "filtered_corrupt_zstd_frames": 0,
+        "filtered_oversized_decompressed_texts": 0,
         "filtered_non_utf8_decompressed_texts": 0,
         "text_md5_mismatches": 0,
         "selected_documents": 0,
@@ -1489,21 +1464,10 @@ def _truncated_zstd_frame_size(source: Dict[str, Any]) -> int:
     return value
 
 
-def _discard_corrupt_zstd_frames(source: Dict[str, Any]) -> bool:
-    value = source.get("discard_corrupt_zstd_frames_with_valid_header")
-    if value is not True:
-        raise ConfigError(
-            "source.discard_corrupt_zstd_frames_with_valid_header must be true"
-        )
-    return value
-
-
-def _discard_non_utf8_decompressed_text(source: Dict[str, Any]) -> bool:
-    value = source.get("discard_non_utf8_decompressed_text")
-    if value is not True:
-        raise ConfigError(
-            "source.discard_non_utf8_decompressed_text must be true"
-        )
+def _text_decode_error_policy(source: Dict[str, Any]) -> str:
+    value = source.get("text_decode_error_policy")
+    if value != "discard":
+        raise ConfigError("source.text_decode_error_policy must be 'discard'")
     return value
 
 
