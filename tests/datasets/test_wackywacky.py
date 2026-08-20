@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import os
+import random
 import shutil
 import tempfile
 import unittest
@@ -40,6 +41,7 @@ def resolved_config(
                 "encoding": "utf-8",
                 "text_encoding": "hex-zstd-utf8",
                 "max_decompressed_text_bytes": 1024 * 1024,
+                "discard_truncated_zstd_frame_size_bytes": 65535,
                 "columns": list(_EXPECTED_COLUMNS),
                 "max_field_size_bytes": 1024 * 1024,
                 "checkpoint_interval_records": checkpoint_interval,
@@ -251,6 +253,35 @@ class WackyWackyAdapterTests(unittest.TestCase):
         result = WackyWackyAdapter().scan(resolved_config(candidate_documents=1))
         self.assertEqual([document.text for document in result.documents], ["Texto"])
         self.assertEqual(result.metrics["text_md5_mismatches"], 1)
+
+    def test_discards_and_counts_configured_truncated_zstd_frame(self) -> None:
+        raw_bytes = random.Random(42).randbytes(100_000)
+        compressed = zstd.ZstdCompressor(level=1).compress(raw_bytes)
+        self.assertGreater(len(compressed), 65_535)
+
+        truncated = record(1, "conteúdo sintético substituído")
+        truncated["text"] = compressed[:65_535].hex()
+        truncated["text_md5"] = hashlib.md5(
+            raw_bytes, usedforsecurity=False
+        ).hexdigest()
+        write_tsv(
+            self.source,
+            [truncated, record(2, "registro sintético válido")],
+        )
+
+        result = WackyWackyAdapter().scan(
+            resolved_config(candidate_documents=1)
+        )
+
+        self.assertEqual(
+            [document.text for document in result.documents],
+            ["registro sintético válido"],
+        )
+        self.assertEqual(result.metrics["rows_seen"], 2)
+        self.assertEqual(
+            result.metrics["filtered_truncated_zstd_frames_65535_bytes"],
+            1,
+        )
 
     def test_rejects_decompressed_text_above_configured_limit(self) -> None:
         write_tsv(self.source, [record(1, "A" * 1024)])

@@ -43,7 +43,13 @@ _EXPECTED_COLUMNS = (
 )
 _PARAGRAPH_BREAK_RE = re.compile(r"\n\s*\n+")
 _MD5_RE = re.compile(r"[0-9a-fA-F]{32}\Z")
+_ZSTD_FRAME_MAGIC = b"\x28\xb5\x2f\xfd"
+_TRUNCATED_ZSTD_FRAME_SIZE_BYTES = 65_535
 _ZSTD_DECOMPRESSOR = zstd.ZstdDecompressor()
+
+
+class _TruncatedZstdFrameError(ValueError):
+    """A known source truncation that is safe to discard per configuration."""
 
 
 @dataclass(frozen=True)
@@ -106,6 +112,7 @@ class WackyWackyAdapter:
             source.get("max_decompressed_text_bytes"),
             "source.max_decompressed_text_bytes",
         )
+        truncated_zstd_frame_size = _truncated_zstd_frame_size(source)
         sample_bytes = _positive_int(
             source.get("fingerprint_sample_bytes", 64 * 1024),
             "source.fingerprint_sample_bytes",
@@ -201,6 +208,7 @@ class WackyWackyAdapter:
                         seed=seed,
                         metrics=metrics,
                         maximum_text_bytes=max_decompressed_text_bytes,
+                        truncated_zstd_frame_size=truncated_zstd_frame_size,
                     )
                     if document is not None:
                         metrics["eligible_records"] += 1
@@ -391,6 +399,7 @@ def _validate_config(
         source.get("max_decompressed_text_bytes"),
         "source.max_decompressed_text_bytes",
     )
+    _truncated_zstd_frame_size(source)
     if filters.get("status") != "done":
         raise ConfigError("WackyWacky filters.status must be 'done'")
     for name in ("require_text", "require_text_md5", "exclude_same_as"):
@@ -483,6 +492,7 @@ def _eligible_document(
     seed: int,
     metrics: Dict[str, int],
     maximum_text_bytes: int,
+    truncated_zstd_frame_size: int,
 ) -> Optional[Document]:
     if record["status"].strip() != filters.get("status", "done"):
         metrics["filtered_status"] += 1
@@ -505,11 +515,16 @@ def _eligible_document(
         metrics[f"filtered_page_{page_rejection_reason}"] += 1
         return None
 
-    text, text_md5_matches = _decode_text(
-        text,
-        text_md5,
-        maximum_bytes=maximum_text_bytes,
-    )
+    try:
+        text, text_md5_matches = _decode_text(
+            text,
+            text_md5,
+            maximum_bytes=maximum_text_bytes,
+            truncated_zstd_frame_size=truncated_zstd_frame_size,
+        )
+    except _TruncatedZstdFrameError:
+        metrics["filtered_truncated_zstd_frames_65535_bytes"] += 1
+        return None
     if not text_md5_matches:
         metrics["text_md5_mismatches"] += 1
 
@@ -640,7 +655,12 @@ def _title_starts_with_marker(title: str, marker: str) -> bool:
     )
 
 
-def _decode_text(encoded: str, text_md5: str, maximum_bytes: int) -> tuple[str, bool]:
+def _decode_text(
+    encoded: str,
+    text_md5: str,
+    maximum_bytes: int,
+    truncated_zstd_frame_size: int,
+) -> tuple[str, bool]:
     if not _MD5_RE.fullmatch(text_md5):
         raise ValueError("WackyWacky text_md5 is not a valid MD5 digest")
     try:
@@ -666,6 +686,13 @@ def _decode_text(encoded: str, text_md5: str, maximum_bytes: int) -> tuple[str, 
             max_output_size=maximum_bytes,
         )
     except zstd.ZstdError:
+        if (
+            len(compressed) == truncated_zstd_frame_size
+            and compressed.startswith(_ZSTD_FRAME_MAGIC)
+        ):
+            raise _TruncatedZstdFrameError(
+                "WackyWacky text contains a configured truncated Zstandard frame"
+            ) from None
         raise ValueError("WackyWacky text is not a valid Zstandard frame") from None
     if len(decoded_bytes) > maximum_bytes:
         raise ValueError("WackyWacky decompressed text exceeds the size limit")
@@ -1390,6 +1417,7 @@ def _resume_metrics(value: Any) -> Dict[str, int]:
         "filtered_same_as": 0,
         "filtered_page_search": 0,
         "filtered_page_listing": 0,
+        "filtered_truncated_zstd_frames_65535_bytes": 0,
         "text_md5_mismatches": 0,
         "selected_documents": 0,
         "short_lines_considered": 0,
@@ -1408,6 +1436,18 @@ def _resume_metrics(value: Any) -> Dict[str, int]:
             raise ConfigError("invalid WackyWacky checkpoint metrics")
         metrics[key] = saved
     return metrics
+
+
+def _truncated_zstd_frame_size(source: Dict[str, Any]) -> int:
+    value = _positive_int(
+        source.get("discard_truncated_zstd_frame_size_bytes"),
+        "source.discard_truncated_zstd_frame_size_bytes",
+    )
+    if value != _TRUNCATED_ZSTD_FRAME_SIZE_BYTES:
+        raise ConfigError(
+            "source.discard_truncated_zstd_frame_size_bytes must be 65535"
+        )
+    return value
 
 
 def _positive_int(value: Any, name: str) -> int:
