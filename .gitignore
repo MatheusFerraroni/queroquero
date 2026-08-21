@@ -28,6 +28,7 @@ __pycache__/
 /checkpoints/
 /outputs/
 /runs/
+/logs/
 /wandb/
 *.ckpt
 *.pt

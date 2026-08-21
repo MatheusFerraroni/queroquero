@@ -1,6 +1,6 @@
 # Quero-Quero
 
-Preparação reprodutível de corpora PT-BR para futuro continual pretraining do
+Preparação e continual pretraining reprodutíveis de corpora PT-BR para o
 `Polygl0t/Tucano2-0.6B-Base`.
 
 ## Estado
@@ -10,8 +10,10 @@ valida e seleciona documentos, faz limpeza conservadora, deduplicação exata
 intradataset, tokenização com o tokenizer original, separação por documento,
 packing e escrita de shards verificáveis.
 
-Este repositório ainda não implementa treinamento, uso de GPUs, avaliação de
-modelo ou exportação de pesos.
+O continual pretraining full-parameter, a avaliação por loss/perplexidade,
+checkpoints retomáveis e a exportação Hugging Face também estão implementados.
+O alvo executável do MVP é uma única P100 de 12 GB; a execução real continua
+dependente dos derivados locais e da alocação Slurm do cluster.
 
 ## Contrato da preparação
 
@@ -51,7 +53,7 @@ comuns ficam em `configs/preparation.json`.
 
 ## Instalação
 
-Use Python 3.12 em um ambiente virtual gerenciado pelo `uv`:
+Use Python 3.12 em um ambiente virtual gerenciado pelo `uv` para preparação:
 
 ```sh
 uv venv --python 3.12 .venv
@@ -70,8 +72,20 @@ saída fica no repositório. Um caminho relativo é resolvido a partir do projet
 um caminho absoluto permite armazenar os derivados em outro volume. O `.env` é
 local e ignorado pelo Git.
 
-Todos os comandos Python deste projeto passam explicitamente por `uv` e pelo
-interpretador `.venv/bin/python`; não use o Python do sistema.
+Os comandos de preparação passam explicitamente por `uv` e pelo interpretador
+`.venv/bin/python`; não use o Python do sistema. No cluster, o runner de treino
+ativa o mesmo ambiente pelo Conda antes de chamar `python` diretamente.
+
+As dependências de GPU ficam separadas para que a preparação continue sem
+PyTorch. Na P100, instale o ambiente pinado com:
+
+```sh
+./scripts/install_training_dependencies.sh
+```
+
+Isso instala `torch==2.7.1+cu118` e `bitsandbytes==0.50.0`. CUDA 11.8 é
+intencional: a P100 usa a arquitetura Pascal `sm_60`, removida dos builds CUDA
+13.
 
 GigaVerbo é lido por streaming diretamente dos 224 Parquets locais. A cópia
 deve preservar o índice `.cache/huggingface/trees/<revisão>.json` criado pelo
@@ -139,6 +153,9 @@ somente `.venv/bin/python` e mantêm o cache do `uv` em `cache/uv` por padrão.
 | `scripts/inspect_preparation.sh` | Validar uma preparação e resumir schema, shards, compressão, contagens e métricas sem imprimir conteúdo. |
 | `scripts/inspect_smoke_all.sh` | Localizar o smoke mais recente de cada dataset e decodificar a row 0 do split de treino. |
 | `scripts/inspect_preparation.py` | Implementação Python do inspetor; normalmente é chamada pelo wrapper `.sh`. |
+| `scripts/install_training_dependencies.sh` | Instalar e conferir o stack CUDA 11.8 no Conda atual. |
+| `scripts/submit_p100.sh` | Submeter um modo de treino exigindo partição e nó P100 explícitos. |
+| `scripts/train_p100.sbatch` | Executar preflight, smoke, MVP, retomada ou validação dentro do Slurm. |
 
 Execute todos os smoke tests de preparação:
 
@@ -208,6 +225,43 @@ alterar qualquer limiar inicia um novo scan.
 O relatório v2 e as métricas desses filtros não contêm exemplos, URLs, títulos,
 hashes de blocos ou conteúdo da fonte.
 
+## Continual pretraining na P100
+
+O treino usa os seis datasets em proporções iguais, sem LoRA, adapters,
+quantização dos pesos ou alteração do tokenizer. Os parâmetros permanecem em
+FP32; forward e backward usam autocast FP16 com escala dinâmica. Gradient
+checkpointing, microbatch 1 e AdamW8bit mantêm o uso de memória compatível com
+a P100 de 12 GB.
+
+| Perfil | treino/avaliação por dataset | passos | checkpoint |
+| --- | ---: | ---: | ---: |
+| `smoke` | 8 / 2 | 6 | 3 |
+| `mvp` | 256 / 32 | 192 | 96 |
+
+As configurações versionadas ficam em `configs/training/`. Antes de qualquer
+treino, o preflight exige exatamente uma P100 visível, capability `sm_60`,
+wheel CUDA 11.8, todos os seis manifests atuais e um forward/backward real sem
+OOM ou valores não finitos.
+
+O fluxo completo de instalação, cache, submissão, retomada, monitoramento e
+validação está em [`docs/training-p100.md`](docs/training-p100.md).
+
+As interfaces principais são:
+
+```sh
+python -m queroquero.train cache-model
+python -m queroquero.train preflight --config configs/training/p100-smoke.json
+python -m queroquero.train run --config configs/training/p100-smoke.json
+python -m queroquero.train run --config configs/training/p100-smoke.json --resume
+python -m queroquero.train run --config configs/training/p100-mvp.json
+python -m queroquero.train validate --artifact artifacts/<artifact-id>
+```
+
+Runs, métricas, checkpoints, logs e pesos permanecem fora do Git. O MVP mede
+loss e perplexidade por dataset antes e depois do epoch. Uma regressão bloqueia
+promoção, mas não apaga o artefato técnico; OOM, NaN, hashes divergentes ou
+tokenizer alterado encerram a execução sem fallback silencioso.
+
 ## Segurança e proveniência
 
 Fontes são abertas somente para leitura e ZIPs não são extraídos. A separação
@@ -230,6 +284,5 @@ registros reais:
 .venv/bin/python -m unittest discover -v
 ```
 
-O contrato futuro do modelo permanece documentado em
-[`docs/model-artifact-contract.md`](docs/model-artifact-contract.md), mas não é
-executado pela entrega atual.
+O exportador e o validador executam o contrato documentado em
+[`docs/model-artifact-contract.md`](docs/model-artifact-contract.md).
