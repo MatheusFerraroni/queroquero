@@ -1,13 +1,20 @@
 import json
+import os
 import random
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from queroquero.train import (
     CHECKPOINT_SCHEMA,
     _dataset_counts,
+    _interruption_requested,
     _restore_checkpoint_state,
+    _run_on_main,
+    _validate_gpu_environment,
     _validate_checkpoint,
     build_parser,
 )
@@ -34,13 +41,114 @@ class TrainCoreTests(unittest.TestCase):
         ]
         self.assertEqual(_dataset_counts(sequences), {"adrenaline": 1, "brwac": 2})
 
+    def test_rank_zero_failures_are_broadcast_before_a_barrier(self) -> None:
+        class MainContext:
+            is_main = True
+
+            def broadcast_object(self, value):
+                return value
+
+        with self.assertRaisesRegex(RuntimeError, "rank 0 ValueError: write failed"):
+            _run_on_main(
+                MainContext(),
+                lambda: (_ for _ in ()).throw(ValueError("write failed")),
+            )
+
+    def test_interrupt_marker_is_checked_only_by_rank_zero_and_broadcast(self) -> None:
+        class MainContext:
+            is_main = True
+
+            def broadcast_object(self, value):
+                self.broadcast = value
+                return value
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            marker = Path(temporary_dir) / "interrupt"
+            marker.touch()
+            context = MainContext()
+            with patch(
+                "queroquero.train.PROJECT_ROOT", Path(temporary_dir).resolve()
+            ):
+                with patch.dict(
+                    os.environ, {"TRAIN_INTERRUPT_FILE": marker.as_posix()}
+                ):
+                    self.assertTrue(_interruption_requested(context))
+            self.assertTrue(context.broadcast)
+
+    def test_l40s_runtime_validates_two_homogeneous_bf16_gpus(self) -> None:
+        config = json.loads(
+            (
+                Path(__file__).resolve().parents[1]
+                / "configs/training/l40s-smoke.json"
+            ).read_text(encoding="utf-8")
+        )
+
+        class Properties:
+            name = "NVIDIA L40S"
+            total_memory = 48 * 1024**3
+
+        class Nccl:
+            @staticmethod
+            def version():
+                return (2, 21, 5)
+
+        class Cuda:
+            nccl = Nccl()
+
+            @staticmethod
+            def is_available():
+                return True
+
+            @staticmethod
+            def device_count():
+                return 2
+
+            @staticmethod
+            def get_device_properties(index):
+                self.assertEqual(index, 0)
+                return Properties()
+
+            @staticmethod
+            def get_device_capability(index):
+                self.assertEqual(index, 0)
+                return (8, 9)
+
+            @staticmethod
+            def get_arch_list():
+                return ["sm_60", "sm_89"]
+
+            @staticmethod
+            def is_bf16_supported():
+                return True
+
+        class Context:
+            backend = "nccl"
+            rank = 0
+            local_rank = 0
+            world_size = 2
+
+            @staticmethod
+            def all_gather_objects(value):
+                other = deepcopy(value)
+                other["rank"] = 1
+                other["local_rank"] = 1
+                return [value, other]
+
+        torch = SimpleNamespace(
+            cuda=Cuda(), version=SimpleNamespace(cuda="11.8")
+        )
+        result = _validate_gpu_environment(torch, config, Context())
+        self.assertEqual(len(result["gpus"]), 2)
+        self.assertEqual(result["nccl_version"], [2, 21, 5])
+
     def test_checkpoint_validation_binds_cursor_and_input_hashes(self) -> None:
         resolved = {
             "run_id": "a" * 20,
             "config_sha256": "b" * 64,
             "inputs_sha256": "c" * 64,
             "git_commit": "d" * 40,
-            "training": {"gradient_accumulation_steps": 8},
+            "training": {"global_batch_sequences": 8},
+            "execution": {"world_size": 2},
         }
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir) / "step-000003"
@@ -65,6 +173,8 @@ class TrainCoreTests(unittest.TestCase):
                 "run_id": resolved["run_id"],
                 "optimizer_step": 3,
                 "sequences_consumed": 24,
+                "world_size": 2,
+                "global_batch_sequences": 8,
                 "config_sha256": resolved["config_sha256"],
                 "inputs_sha256": resolved["inputs_sha256"],
                 "git_commit": resolved["git_commit"],
@@ -103,8 +213,8 @@ class TrainCoreTests(unittest.TestCase):
             def __init__(self):
                 self.loaded = None
 
-            def set_rng_state_all(self, value):
-                self.loaded = value
+            def set_rng_state(self, value, device):
+                self.loaded = (value, device)
 
         class FakeTorch:
             def __init__(self):
@@ -117,11 +227,17 @@ class TrainCoreTests(unittest.TestCase):
                     "optimizer": {"optimizer": 1},
                     "scheduler": {"scheduler": 2},
                     "scaler": {"scaler": 3},
-                    "python_rng_state": expected_python_rng,
-                    "torch_rng_state": FakeTensor(),
-                    "cuda_rng_state_all": ["cuda-rng"],
+                    "rng_by_rank": [
+                        {
+                            "rank": 0,
+                            "python": expected_python_rng,
+                            "torch_cpu": FakeTensor(),
+                            "torch_cuda": "cuda-rng",
+                        }
+                    ],
                     "optimizer_step": 3,
                     "sequences_consumed": 24,
+                    "world_size": 1,
                 }
 
             def set_rng_state(self, value):
@@ -146,7 +262,7 @@ class TrainCoreTests(unittest.TestCase):
         self.assertEqual(scaler.loaded, {"scaler": 3})
         self.assertEqual(random.getstate(), expected_python_rng)
         self.assertEqual(torch.cpu_rng, "cpu-rng")
-        self.assertEqual(torch.cuda.loaded, ["cuda-rng"])
+        self.assertEqual(torch.cuda.loaded, ("cuda-rng", "cuda"))
 
 
 if __name__ == "__main__":

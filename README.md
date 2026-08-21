@@ -12,8 +12,8 @@ packing e escrita de shards verificáveis.
 
 O continual pretraining full-parameter, a avaliação por loss/perplexidade,
 checkpoints retomáveis e a exportação Hugging Face também estão implementados.
-O alvo executável do MVP é uma única P100 de 12 GB; a execução real continua
-dependente dos derivados locais e da alocação Slurm do cluster.
+Os alvos executáveis são uma P100 de 12 GB ou duas L40S no mesmo nó. A execução
+real continua dependente dos derivados locais e da alocação Slurm do cluster.
 
 ## Contrato da preparação
 
@@ -87,6 +87,13 @@ Isso instala `torch==2.7.1+cu118` e `bitsandbytes==0.50.0`. CUDA 11.8 é
 intencional: a P100 usa a arquitetura Pascal `sm_60`, removida dos builds CUDA
 13.
 
+Para duas L40S, instale apenas as dependências comuns, sem tornar
+`bitsandbytes` obrigatório:
+
+```sh
+./scripts/install_training_dependencies_l40s.sh
+```
+
 GigaVerbo é lido por streaming diretamente dos 224 Parquets locais. A cópia
 deve preservar o índice `.cache/huggingface/trees/<revisão>.json` criado pelo
 download, usado para confirmar a lista, os tamanhos e os hashes sem reler
@@ -153,9 +160,12 @@ somente `.venv/bin/python` e mantêm o cache do `uv` em `cache/uv` por padrão.
 | `scripts/inspect_preparation.sh` | Validar uma preparação e resumir schema, shards, compressão, contagens e métricas sem imprimir conteúdo. |
 | `scripts/inspect_smoke_all.sh` | Localizar o smoke mais recente de cada dataset e decodificar a row 0 do split de treino. |
 | `scripts/inspect_preparation.py` | Implementação Python do inspetor; normalmente é chamada pelo wrapper `.sh`. |
-| `scripts/install_training_dependencies.sh` | Instalar e conferir o stack CUDA 11.8 no Conda atual. |
+| `scripts/install_training_dependencies.sh` | Instalar e conferir o stack P100 no Conda atual. |
+| `scripts/install_training_dependencies_l40s.sh` | Instalar e conferir o stack L40S sem bitsandbytes obrigatório. |
 | `scripts/submit_p100.sh` | Submeter um modo de treino exigindo partição e nó P100 explícitos. |
 | `scripts/train_p100.sbatch` | Executar preflight, smoke, MVP, retomada ou validação dentro do Slurm. |
+| `scripts/submit_l40s.sh` | Submeter duas L40S na partição `l40s`, sem fixar nó. |
+| `scripts/train_l40s.sbatch` | Executar os modos distribuídos com `torchrun`. |
 
 Execute todos os smoke tests de preparação:
 
@@ -225,7 +235,7 @@ alterar qualquer limiar inicia um novo scan.
 O relatório v2 e as métricas desses filtros não contêm exemplos, URLs, títulos,
 hashes de blocos ou conteúdo da fonte.
 
-## Continual pretraining na P100
+## Continual pretraining na P100 ou em 2× L40S
 
 O treino usa os seis datasets em proporções iguais, sem LoRA, adapters,
 quantização dos pesos ou alteração do tokenizer. Os parâmetros permanecem em
@@ -233,18 +243,25 @@ FP32; forward e backward usam autocast FP16 com escala dinâmica. Gradient
 checkpointing, microbatch 1 e AdamW8bit mantêm o uso de memória compatível com
 a P100 de 12 GB.
 
+Nas duas L40S, o mesmo batch global de oito sequências é dividido em quatro
+sequências por rank. O treino usa DDP/NCCL, BF16 sem scaler, AdamW fundido e
+três microbatches sob `no_sync()`; o quarto sincroniza o gradiente global. Os
+pesos, gradientes e estados do AdamW permanecem FP32.
+
 | Perfil | treino/avaliação por dataset | passos | checkpoint |
 | --- | ---: | ---: | ---: |
 | `smoke` | 8 / 2 | 6 | 3 |
 | `mvp` | 256 / 32 | 192 | 96 |
 
-As configurações versionadas ficam em `configs/training/`. Antes de qualquer
-treino, o preflight exige exatamente uma P100 visível, capability `sm_60`,
-wheel CUDA 11.8, todos os seis manifests atuais e um forward/backward real sem
-OOM ou valores não finitos.
+As configurações `queroquero-training-config/v2` ficam em `configs/training/`.
+Antes de qualquer treino, o preflight exige o hardware exato do perfil, wheel
+CUDA 11.8, todos os seis manifests atuais e um passo global real sem OOM ou
+valores não finitos. O perfil L40S exige dois ranks, duas GPUs homogêneas
+`sm_89`, BF16, NCCL e AdamW fundido.
 
 O fluxo completo de instalação, cache, submissão, retomada, monitoramento e
-validação está em [`docs/training-p100.md`](docs/training-p100.md).
+validação está em [`docs/training-p100.md`](docs/training-p100.md) e
+[`docs/training-l40s.md`](docs/training-l40s.md).
 
 As interfaces principais são:
 
@@ -255,6 +272,13 @@ python -m queroquero.train run --config configs/training/p100-smoke.json
 python -m queroquero.train run --config configs/training/p100-smoke.json --resume
 python -m queroquero.train run --config configs/training/p100-mvp.json
 python -m queroquero.train validate --artifact artifacts/<artifact-id>
+```
+
+O alvo L40S executa `preflight` e `run` exclusivamente por:
+
+```sh
+torchrun --standalone --nproc_per_node=2 \
+  -m queroquero.train run --config configs/training/l40s-mvp.json
 ```
 
 Runs, métricas, checkpoints, logs e pesos permanecem fora do Git. O MVP mede

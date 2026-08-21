@@ -15,7 +15,7 @@ from .config import (
 )
 
 
-TRAINING_CONFIG_SCHEMA = "queroquero-training-config/v1"
+TRAINING_CONFIG_SCHEMA = "queroquero-training-config/v2"
 TRAINING_METHOD = "full_parameter_continual_pretraining"
 TRAINING_DATASET_IDS = tuple(sorted(DATASET_IDS))
 
@@ -56,6 +56,7 @@ def validate_training_config(config: Dict[str, Any]) -> None:
         "model",
         "datasets",
         "training",
+        "execution",
         "hardware",
         "output",
     }
@@ -116,24 +117,43 @@ def validate_training_config(config: Dict[str, Any]) -> None:
     if seen != set(TRAINING_DATASET_IDS):
         raise TrainingConfigError("training configuration omits a dataset")
 
+    execution = _mapping(config, "execution")
+    hardware = _mapping(config, "hardware")
+    target = _hardware_target(execution, hardware)
     training = _mapping(config, "training")
-    fixed = {
+    common = {
         "method": TRAINING_METHOD,
         "sequence_length": 1024,
         "seed": 42,
         "epochs": 1,
-        "micro_batch_size": 1,
-        "gradient_accumulation_steps": 8,
-        "optimizer": "adamw8bit",
+        "micro_batch_size_per_rank": 1,
+        "global_batch_sequences": 8,
+        "global_batch_tokens": 8192,
         "learning_rate": 0.000005,
         "scheduler": "linear",
         "weight_decay": 0.1,
         "betas": [0.9, 0.95],
         "epsilon": 0.00000001,
         "max_grad_norm": 1.0,
-        "precision": "fp16",
         "gradient_checkpointing": True,
     }
+    target_training = {
+        "p100": {
+            "gradient_accumulation_steps_per_rank": 8,
+            "optimizer": "adamw8bit",
+            "optimizer_implementation": "bitsandbytes",
+            "precision": "fp16",
+            "use_grad_scaler": True,
+        },
+        "l40s": {
+            "gradient_accumulation_steps_per_rank": 4,
+            "optimizer": "adamw",
+            "optimizer_implementation": "torch_fused",
+            "precision": "bf16",
+            "use_grad_scaler": False,
+        },
+    }[target]
+    fixed = {**common, **target_training}
     expected_training_keys = set(fixed) | {
         "warmup_steps",
         "checkpoint_steps",
@@ -144,9 +164,21 @@ def validate_training_config(config: Dict[str, Any]) -> None:
     for key, expected in fixed.items():
         if not _matches_exact(training.get(key), expected):
             raise TrainingConfigError(f"training.{key} must be {expected!r}")
-    expected_steps = train_total // training["gradient_accumulation_steps"]
-    if train_total % training["gradient_accumulation_steps"]:
-        raise TrainingConfigError("training rows must divide the accumulation interval")
+
+    expected_global_batch = (
+        execution["world_size"]
+        * training["micro_batch_size_per_rank"]
+        * training["gradient_accumulation_steps_per_rank"]
+    )
+    if training["global_batch_sequences"] != expected_global_batch:
+        raise TrainingConfigError("global batch does not match world size and accumulation")
+    if training["global_batch_tokens"] != (
+        training["global_batch_sequences"] * training["sequence_length"]
+    ):
+        raise TrainingConfigError("global token batch is inconsistent")
+    if train_total % training["global_batch_sequences"]:
+        raise TrainingConfigError("training rows must divide the global batch")
+    expected_steps = train_total // training["global_batch_sequences"]
     if not _matches_exact(training.get("total_optimizer_steps"), expected_steps):
         raise TrainingConfigError("total_optimizer_steps does not match dataset budgets")
     expected_warmup = 1 if profile == "smoke" else 20
@@ -155,17 +187,6 @@ def validate_training_config(config: Dict[str, Any]) -> None:
     expected_checkpoints = [expected_steps // 2]
     if not _matches_exact(training.get("checkpoint_steps"), expected_checkpoints):
         raise TrainingConfigError("checkpoint must be exactly at the half epoch")
-
-    hardware = _mapping(config, "hardware")
-    if not _matches_exact(hardware, {
-        "accelerator": "cuda",
-        "visible_gpus": 1,
-        "gpu_name_contains": "P100",
-        "compute_capability": [6, 0],
-        "minimum_memory_gib": 11,
-        "torch_cuda": "11.8",
-    }):
-        raise TrainingConfigError("hardware must target one P100 with CUDA 11.8")
 
     output = _mapping(config, "output")
     if set(output) != {"runs_root", "checkpoints_root", "artifacts_root"}:
@@ -188,6 +209,51 @@ def resolve_training_output_roots(config: Dict[str, Any]) -> Dict[str, Path]:
     }
 
 
+def _hardware_target(execution: Dict[str, Any], hardware: Dict[str, Any]) -> str:
+    targets = {
+        "p100": (
+            {
+                "strategy": "single_process",
+                "backend": "none",
+                "world_size": 1,
+                "processes_per_node": 1,
+            },
+            {
+                "accelerator": "cuda",
+                "visible_gpus": 1,
+                "gpu_name_contains": "P100",
+                "compute_capability": [6, 0],
+                "minimum_memory_gib": 11,
+                "torch_cuda": "11.8",
+                "required_arch": "sm_60",
+            },
+        ),
+        "l40s": (
+            {
+                "strategy": "ddp",
+                "backend": "nccl",
+                "world_size": 2,
+                "processes_per_node": 2,
+            },
+            {
+                "accelerator": "cuda",
+                "visible_gpus": 2,
+                "gpu_name_contains": "L40S",
+                "compute_capability": [8, 9],
+                "minimum_memory_gib": 44,
+                "torch_cuda": "11.8",
+                "required_arch": "sm_89",
+            },
+        ),
+    }
+    for name, (expected_execution, expected_hardware) in targets.items():
+        if _matches_exact(execution, expected_execution) and _matches_exact(
+            hardware, expected_hardware
+        ):
+            return name
+    raise TrainingConfigError("execution and hardware must target P100 or 2x L40S")
+
+
 def _mapping(config: Dict[str, Any], key: str) -> Dict[str, Any]:
     value = config.get(key)
     if not isinstance(value, dict):
@@ -200,7 +266,10 @@ def _matches_exact(value: Any, expected: Any) -> bool:
         return (
             isinstance(value, dict)
             and set(value) == set(expected)
-            and all(_matches_exact(value[key], nested) for key, nested in expected.items())
+            and all(
+                _matches_exact(value[key], nested)
+                for key, nested in expected.items()
+            )
         )
     if isinstance(expected, list):
         return (

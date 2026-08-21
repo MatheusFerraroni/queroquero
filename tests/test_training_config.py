@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from queroquero.training_config import (
+    TRAINING_CONFIG_SCHEMA,
     TrainingConfigError,
     load_training_config,
     validate_training_config,
@@ -16,18 +17,42 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class TrainingConfigTests(unittest.TestCase):
-    def test_versioned_p100_configs_match_the_fixed_budgets(self) -> None:
+    def test_versioned_configs_match_the_fixed_budgets(self) -> None:
         smoke, smoke_digest = load_training_config(
             "configs/training/p100-smoke.json"
         )
         mvp, mvp_digest = load_training_config("configs/training/p100-mvp.json")
+        l40s_smoke, l40s_smoke_digest = load_training_config(
+            "configs/training/l40s-smoke.json"
+        )
+        l40s_mvp, l40s_mvp_digest = load_training_config(
+            "configs/training/l40s-mvp.json"
+        )
 
+        self.assertEqual(smoke["schema_version"], TRAINING_CONFIG_SCHEMA)
         self.assertEqual(smoke["training"]["total_optimizer_steps"], 6)
         self.assertEqual(smoke["training"]["checkpoint_steps"], [3])
         self.assertEqual(mvp["training"]["total_optimizer_steps"], 192)
         self.assertEqual(mvp["training"]["checkpoint_steps"], [96])
-        self.assertEqual(len(smoke_digest), 64)
-        self.assertEqual(len(mvp_digest), 64)
+        self.assertEqual(l40s_smoke["training"]["total_optimizer_steps"], 6)
+        self.assertEqual(l40s_smoke["training"]["checkpoint_steps"], [3])
+        self.assertEqual(l40s_mvp["training"]["total_optimizer_steps"], 192)
+        self.assertEqual(l40s_mvp["training"]["checkpoint_steps"], [96])
+        self.assertEqual(l40s_mvp["execution"]["world_size"], 2)
+        self.assertEqual(l40s_mvp["training"]["precision"], "bf16")
+        self.assertEqual(
+            2
+            * l40s_mvp["training"]["micro_batch_size_per_rank"]
+            * l40s_mvp["training"]["gradient_accumulation_steps_per_rank"],
+            l40s_mvp["training"]["global_batch_sequences"],
+        )
+        for digest in (
+            smoke_digest,
+            mvp_digest,
+            l40s_smoke_digest,
+            l40s_mvp_digest,
+        ):
+            self.assertEqual(len(digest), 64)
 
     def test_training_contract_rejects_lora_or_changed_budget(self) -> None:
         config = json.loads(
@@ -60,6 +85,27 @@ class TrainingConfigTests(unittest.TestCase):
         changed_precision["training"]["precision"] = "bf16"
         with self.assertRaisesRegex(TrainingConfigError, "precision"):
             validate_training_config(changed_precision)
+
+    def test_l40s_contract_rejects_world_size_or_fp16(self) -> None:
+        config = json.loads(
+            (PROJECT_ROOT / "configs/training/l40s-smoke.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        changed_world = deepcopy(config)
+        changed_world["execution"]["world_size"] = 1
+        with self.assertRaisesRegex(TrainingConfigError, "L40S"):
+            validate_training_config(changed_world)
+
+        changed_precision = deepcopy(config)
+        changed_precision["training"]["precision"] = "fp16"
+        with self.assertRaisesRegex(TrainingConfigError, "precision"):
+            validate_training_config(changed_precision)
+
+        changed_batch = deepcopy(config)
+        changed_batch["training"]["global_batch_sequences"] = 4
+        with self.assertRaisesRegex(TrainingConfigError, "global_batch_sequences"):
+            validate_training_config(changed_batch)
 
     def test_training_contract_rejects_unknown_keys_and_boolean_numbers(self) -> None:
         config = json.loads(

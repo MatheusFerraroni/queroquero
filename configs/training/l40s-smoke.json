@@ -1,6 +1,6 @@
 {
   "schema_version": "queroquero-training-config/v2",
-  "profile": "mvp",
+  "profile": "smoke",
   "model": {
     "model_id": "Polygl0t/Tucano2-0.6B-Base",
     "revision": "dad97dc864a8f9a1d240fb9351d098f3af9511d7",
@@ -13,38 +13,38 @@
     {
       "dataset_id": "adrenaline",
       "weight": 1,
-      "train_sequences": 256,
-      "eval_sequences": 32
+      "train_sequences": 8,
+      "eval_sequences": 2
     },
     {
       "dataset_id": "brwac",
       "weight": 1,
-      "train_sequences": 256,
-      "eval_sequences": 32
+      "train_sequences": 8,
+      "eval_sequences": 2
     },
     {
       "dataset_id": "gigaverbo",
       "weight": 1,
-      "train_sequences": 256,
-      "eval_sequences": 32
+      "train_sequences": 8,
+      "eval_sequences": 2
     },
     {
       "dataset_id": "multiwoz_ptbr",
       "weight": 1,
-      "train_sequences": 256,
-      "eval_sequences": 32
+      "train_sequences": 8,
+      "eval_sequences": 2
     },
     {
       "dataset_id": "outerspace",
       "weight": 1,
-      "train_sequences": 256,
-      "eval_sequences": 32
+      "train_sequences": 8,
+      "eval_sequences": 2
     },
     {
       "dataset_id": "wackywacky",
       "weight": 1,
-      "train_sequences": 256,
-      "eval_sequences": 32
+      "train_sequences": 8,
+      "eval_sequences": 2
     }
   ],
   "training": {
@@ -53,38 +53,38 @@
     "seed": 42,
     "epochs": 1,
     "micro_batch_size_per_rank": 1,
-    "gradient_accumulation_steps_per_rank": 8,
+    "gradient_accumulation_steps_per_rank": 4,
     "global_batch_sequences": 8,
     "global_batch_tokens": 8192,
-    "optimizer": "adamw8bit",
-    "optimizer_implementation": "bitsandbytes",
+    "optimizer": "adamw",
+    "optimizer_implementation": "torch_fused",
     "learning_rate": 0.000005,
-    "warmup_steps": 20,
+    "warmup_steps": 1,
     "scheduler": "linear",
     "weight_decay": 0.1,
     "betas": [0.9, 0.95],
     "epsilon": 0.00000001,
     "max_grad_norm": 1.0,
-    "precision": "fp16",
-    "use_grad_scaler": true,
+    "precision": "bf16",
+    "use_grad_scaler": false,
     "gradient_checkpointing": true,
-    "checkpoint_steps": [96],
-    "total_optimizer_steps": 192
+    "checkpoint_steps": [3],
+    "total_optimizer_steps": 6
   },
   "execution": {
-    "strategy": "single_process",
-    "backend": "none",
-    "world_size": 1,
-    "processes_per_node": 1
+    "strategy": "ddp",
+    "backend": "nccl",
+    "world_size": 2,
+    "processes_per_node": 2
   },
   "hardware": {
     "accelerator": "cuda",
-    "visible_gpus": 1,
-    "gpu_name_contains": "P100",
-    "compute_capability": [6, 0],
-    "minimum_memory_gib": 11,
+    "visible_gpus": 2,
+    "gpu_name_contains": "L40S",
+    "compute_capability": [8, 9],
+    "minimum_memory_gib": 44,
     "torch_cuda": "11.8",
-    "required_arch": "sm_60"
+    "required_arch": "sm_89"
   },
   "output": {
     "runs_root": "runs",

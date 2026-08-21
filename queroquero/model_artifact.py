@@ -77,7 +77,7 @@ def export_model_artifact(
             },
             "tokenizer": tokenizer_contract,
             "training": training,
-            "environment": _environment_versions(),
+            "environment": _environment_versions(config),
             "files": file_records,
             "artifact_sha256": _aggregate_files_sha256(file_records),
             "redistribution_status": "internal_research_only",
@@ -129,10 +129,9 @@ def validate_model_artifact(
         raise RuntimeError("model artifact parent changed")
     if manifest.get("redistribution_status") != "internal_research_only":
         raise RuntimeError("model artifact redistribution policy must remain internal")
-    _validate_environment(manifest.get("environment"))
-
     training = manifest.get("training")
     _validate_training_provenance(training)
+    _validate_environment(manifest.get("environment"), training)
     if artifact_id != _expected_artifact_id(training):
         raise RuntimeError("model artifact ID does not match training provenance")
 
@@ -344,6 +343,35 @@ def _validate_training_provenance(training: Any) -> None:
             training[key]
         ):
             raise RuntimeError("model artifact training digest is invalid")
+    execution = training.get("execution")
+    valid_executions = (
+        {
+            "strategy": "single_process",
+            "backend": "none",
+            "world_size": 1,
+            "precision": "fp16",
+            "optimizer": "adamw8bit",
+            "optimizer_implementation": "bitsandbytes",
+            "micro_batch_size_per_rank": 1,
+            "gradient_accumulation_steps_per_rank": 8,
+            "global_batch_sequences": 8,
+            "global_batch_tokens": 8192,
+        },
+        {
+            "strategy": "ddp",
+            "backend": "nccl",
+            "world_size": 2,
+            "precision": "bf16",
+            "optimizer": "adamw",
+            "optimizer_implementation": "torch_fused",
+            "micro_batch_size_per_rank": 1,
+            "gradient_accumulation_steps_per_rank": 4,
+            "global_batch_sequences": 8,
+            "global_batch_tokens": 8192,
+        },
+    )
+    if execution not in valid_executions:
+        raise RuntimeError("model artifact execution strategy is invalid")
     datasets = training.get("datasets")
     if not isinstance(datasets, list) or len(datasets) != len(DATASET_IDS) or {
         item.get("dataset_id") for item in datasets if isinstance(item, dict)
@@ -360,7 +388,7 @@ def _validate_training_provenance(training: Any) -> None:
             raise RuntimeError("model artifact dataset provenance is invalid")
 
 
-def _validate_environment(environment: Any) -> None:
+def _validate_environment(environment: Any, training: Dict[str, Any]) -> None:
     if not isinstance(environment, dict):
         raise RuntimeError("model artifact environment is missing")
     required = {
@@ -369,8 +397,9 @@ def _validate_environment(environment: Any) -> None:
         "torch_cuda",
         "transformers",
         "tokenizers",
-        "bitsandbytes",
     }
+    if training["execution"]["optimizer_implementation"] == "bitsandbytes":
+        required.add("bitsandbytes")
     if set(environment) != required or any(
         not isinstance(environment[key], str) or not environment[key]
         for key in required
@@ -384,7 +413,7 @@ def _validate_environment(environment: Any) -> None:
         raise RuntimeError("model artifact CUDA runtime changed")
     if environment["transformers"] != "5.14.1":
         raise RuntimeError("model artifact Transformers version changed")
-    if environment["bitsandbytes"] != "0.50.0":
+    if "bitsandbytes" in required and environment["bitsandbytes"] != "0.50.0":
         raise RuntimeError("model artifact bitsandbytes version changed")
 
 
@@ -396,22 +425,25 @@ def _expected_artifact_id(training: Dict[str, Any]) -> str:
         "config_sha256": training.get("config_sha256"),
         "inputs_sha256": training.get("inputs_sha256"),
         "optimizer_steps": training.get("optimizer_steps"),
+        "execution": training.get("execution"),
     }
     return sha256_bytes(canonical_json_bytes(value))[:20]
 
 
-def _environment_versions() -> Dict[str, Any]:
+def _environment_versions(config: Dict[str, Any]) -> Dict[str, Any]:
     import torch
     import transformers
 
-    return {
+    versions = {
         "python": platform.python_version(),
         "torch": torch.__version__,
         "torch_cuda": torch.version.cuda,
         "transformers": transformers.__version__,
         "tokenizers": importlib.metadata.version("tokenizers"),
-        "bitsandbytes": importlib.metadata.version("bitsandbytes"),
     }
+    if config["training"]["optimizer_implementation"] == "bitsandbytes":
+        versions["bitsandbytes"] = importlib.metadata.version("bitsandbytes")
+    return versions
 
 
 def _has_safetensors_weights(files: set[str]) -> bool:

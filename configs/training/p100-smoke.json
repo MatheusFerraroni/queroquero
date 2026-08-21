@@ -1,5 +1,5 @@
 {
-  "schema_version": "queroquero-training-config/v1",
+  "schema_version": "queroquero-training-config/v2",
   "profile": "smoke",
   "model": {
     "model_id": "Polygl0t/Tucano2-0.6B-Base",
@@ -52,9 +52,12 @@
     "sequence_length": 1024,
     "seed": 42,
     "epochs": 1,
-    "micro_batch_size": 1,
-    "gradient_accumulation_steps": 8,
+    "micro_batch_size_per_rank": 1,
+    "gradient_accumulation_steps_per_rank": 8,
+    "global_batch_sequences": 8,
+    "global_batch_tokens": 8192,
     "optimizer": "adamw8bit",
+    "optimizer_implementation": "bitsandbytes",
     "learning_rate": 0.000005,
     "warmup_steps": 1,
     "scheduler": "linear",
@@ -63,9 +66,16 @@
     "epsilon": 0.00000001,
     "max_grad_norm": 1.0,
     "precision": "fp16",
+    "use_grad_scaler": true,
     "gradient_checkpointing": true,
     "checkpoint_steps": [3],
     "total_optimizer_steps": 6
+  },
+  "execution": {
+    "strategy": "single_process",
+    "backend": "none",
+    "world_size": 1,
+    "processes_per_node": 1
   },
   "hardware": {
     "accelerator": "cuda",
@@ -73,7 +83,8 @@
     "gpu_name_contains": "P100",
     "compute_capability": [6, 0],
     "minimum_memory_gib": 11,
-    "torch_cuda": "11.8"
+    "torch_cuda": "11.8",
+    "required_arch": "sm_60"
   },
   "output": {
     "runs_root": "runs",

@@ -36,7 +36,40 @@ class ModelArtifactTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "unlisted files"):
                 validate_model_artifact(root, load_model=False)
 
-    def _write_artifact(self, parent: Path) -> Path:
+    def test_l40s_artifact_does_not_require_bitsandbytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = self._write_artifact(Path(temporary_dir), target="l40s")
+            manifest = validate_model_artifact(root, load_model=False)
+            self.assertEqual(manifest["training"]["execution"]["world_size"], 2)
+            self.assertNotIn("bitsandbytes", manifest["environment"])
+
+    def _write_artifact(self, parent: Path, *, target: str = "p100") -> Path:
+        executions = {
+            "p100": {
+                "strategy": "single_process",
+                "backend": "none",
+                "world_size": 1,
+                "precision": "fp16",
+                "optimizer": "adamw8bit",
+                "optimizer_implementation": "bitsandbytes",
+                "micro_batch_size_per_rank": 1,
+                "gradient_accumulation_steps_per_rank": 8,
+                "global_batch_sequences": 8,
+                "global_batch_tokens": 8192,
+            },
+            "l40s": {
+                "strategy": "ddp",
+                "backend": "nccl",
+                "world_size": 2,
+                "precision": "bf16",
+                "optimizer": "adamw",
+                "optimizer_implementation": "torch_fused",
+                "micro_batch_size_per_rank": 1,
+                "gradient_accumulation_steps_per_rank": 4,
+                "global_batch_sequences": 8,
+                "global_batch_tokens": 8192,
+            },
+        }
         training = {
             "method": "full_parameter_continual_pretraining",
             "git_commit": "b" * 40,
@@ -45,6 +78,7 @@ class ModelArtifactTests(unittest.TestCase):
             "config_sha256": "d" * 64,
             "inputs_sha256": "e" * 64,
             "optimizer_steps": 192,
+            "execution": executions[target],
             "datasets": [
                 {
                     "dataset_id": dataset_id,
@@ -111,12 +145,13 @@ class ModelArtifactTests(unittest.TestCase):
                 "torch_cuda": "11.8",
                 "transformers": "5.14.1",
                 "tokenizers": "0.0.0",
-                "bitsandbytes": "0.50.0",
             },
             "files": records,
             "artifact_sha256": _aggregate_files_sha256(records),
             "redistribution_status": "internal_research_only",
         }
+        if target == "p100":
+            manifest["environment"]["bitsandbytes"] = "0.50.0"
         (root / "model_artifact_manifest.json").write_text(
             json.dumps(manifest, sort_keys=True), encoding="utf-8"
         )

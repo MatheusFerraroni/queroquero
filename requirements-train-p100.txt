@@ -1,0 +1,3 @@
+-r requirements-train-common.txt
+
+bitsandbytes==0.50.0
