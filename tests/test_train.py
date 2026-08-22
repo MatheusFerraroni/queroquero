@@ -17,6 +17,7 @@ from queroquero.train import (
     _run_on_main,
     _validate_gpu_environment,
     _validate_checkpoint,
+    _wrap_distributed_model,
     build_parser,
 )
 from queroquero.training_data import TrainingSequence
@@ -149,6 +150,44 @@ class TrainCoreTests(unittest.TestCase):
         self.assertFalse(_cuda_binary_arch_is_compatible("sm_90", (8, 9)))
         self.assertFalse(_cuda_binary_arch_is_compatible("sm_75", (8, 9)))
         self.assertFalse(_cuda_binary_arch_is_compatible("compute_86", (8, 9)))
+
+    def test_ddp_wrapper_disables_static_graph_for_gradient_accumulation(self) -> None:
+        base_model = object()
+        wrapped_model = object()
+        call = {}
+
+        def distributed_data_parallel(model, **kwargs):
+            call["model"] = model
+            call["kwargs"] = kwargs
+            return wrapped_model
+
+        context = SimpleNamespace(
+            local_rank=1,
+            torch=SimpleNamespace(
+                nn=SimpleNamespace(
+                    parallel=SimpleNamespace(
+                        DistributedDataParallel=distributed_data_parallel
+                    )
+                )
+            ),
+        )
+        config = {"execution": {"strategy": "ddp"}}
+
+        result = _wrap_distributed_model(base_model, config, context)
+
+        self.assertIs(result, wrapped_model)
+        self.assertIs(call["model"], base_model)
+        self.assertEqual(
+            call["kwargs"],
+            {
+                "device_ids": [1],
+                "output_device": 1,
+                "static_graph": False,
+                "find_unused_parameters": False,
+                "broadcast_buffers": False,
+                "gradient_as_bucket_view": True,
+            },
+        )
 
     def test_checkpoint_validation_binds_cursor_and_input_hashes(self) -> None:
         resolved = {

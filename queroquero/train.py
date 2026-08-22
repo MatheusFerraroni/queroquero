@@ -779,7 +779,7 @@ def _wrap_distributed_model(
         model,
         device_ids=[context.local_rank],
         output_device=context.local_rank,
-        static_graph=True,
+        static_graph=False,
         find_unused_parameters=False,
         broadcast_buffers=False,
         gradient_as_bucket_view=True,

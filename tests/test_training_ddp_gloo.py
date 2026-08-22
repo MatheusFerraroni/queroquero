@@ -52,7 +52,7 @@ def _gloo_worker(
 
         ddp = torch.nn.parallel.DistributedDataParallel(
             model,
-            static_graph=True,
+            static_graph=False,
             find_unused_parameters=False,
             broadcast_buffers=False,
             gradient_as_bucket_view=True,
