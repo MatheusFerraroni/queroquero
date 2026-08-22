@@ -256,8 +256,9 @@ pesos, gradientes e estados do AdamW permanecem FP32.
 As configurações `queroquero-training-config/v2` ficam em `configs/training/`.
 Antes de qualquer treino, o preflight exige o hardware exato do perfil, wheel
 CUDA 11.8, todos os seis manifests atuais e um passo global real sem OOM ou
-valores não finitos. O perfil L40S exige dois ranks, duas GPUs homogêneas
-`sm_89`, BF16, NCCL e AdamW fundido.
+valores não finitos. O perfil L40S exige dois ranks, duas GPUs homogêneas com
+compute capability `sm_89`, kernels CUDA binariamente compatíveis, BF16, NCCL e
+AdamW fundido.
 
 O fluxo completo de instalação, cache, submissão, retomada, monitoramento e
 validação está em [`docs/training-p100.md`](docs/training-p100.md) e

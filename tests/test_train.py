@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from queroquero.train import (
     CHECKPOINT_SCHEMA,
+    _cuda_binary_arch_is_compatible,
     _dataset_counts,
     _interruption_requested,
     _restore_checkpoint_state,
@@ -115,7 +116,7 @@ class TrainCoreTests(unittest.TestCase):
 
             @staticmethod
             def get_arch_list():
-                return ["sm_60", "sm_89"]
+                return ["sm_60", "sm_86", "sm_90"]
 
             @staticmethod
             def is_bf16_supported():
@@ -140,6 +141,14 @@ class TrainCoreTests(unittest.TestCase):
         result = _validate_gpu_environment(torch, config, Context())
         self.assertEqual(len(result["gpus"]), 2)
         self.assertEqual(result["nccl_version"], [2, 21, 5])
+
+    def test_cuda_binary_arch_compatibility_stays_within_one_major(self) -> None:
+        self.assertTrue(_cuda_binary_arch_is_compatible("sm_80", (8, 9)))
+        self.assertTrue(_cuda_binary_arch_is_compatible("sm_86", (8, 9)))
+        self.assertTrue(_cuda_binary_arch_is_compatible("sm_89", (8, 9)))
+        self.assertFalse(_cuda_binary_arch_is_compatible("sm_90", (8, 9)))
+        self.assertFalse(_cuda_binary_arch_is_compatible("sm_75", (8, 9)))
+        self.assertFalse(_cuda_binary_arch_is_compatible("compute_86", (8, 9)))
 
     def test_checkpoint_validation_binds_cursor_and_input_hashes(self) -> None:
         resolved = {

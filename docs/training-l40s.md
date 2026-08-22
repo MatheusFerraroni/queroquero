@@ -41,9 +41,11 @@ tail -F "logs/train-l40s-${JOB_ID}.err"
 sacct -j "$JOB_ID" --format=JobID,JobName,Partition,State,Elapsed,ExitCode
 ```
 
-O preflight deve identificar exatamente duas L40S homogêneas `sm_89`, BF16,
-NCCL e AdamW fundido, e concluir um passo global completo. Só prossiga com
-`COMPLETED 0:0`.
+O preflight deve identificar exatamente duas L40S homogêneas com compute
+capability `sm_89`, kernels CUDA binariamente compatíveis, BF16, NCCL e AdamW
+fundido, e concluir um passo global completo. Uma wheel pode fornecer cubins
+`sm_80`, `sm_86` ou `sm_89` para esse hardware; o passo real confirma que os
+kernels necessários executam. Só prossiga com `COMPLETED 0:0`.
 
 ## 4. Validar checkpoint e retomada no smoke
 

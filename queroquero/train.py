@@ -612,6 +612,19 @@ def _load_training_dependencies(config: Dict[str, Any]) -> Dict[str, Any]:
     return dependencies
 
 
+def _cuda_binary_arch_is_compatible(
+    compiled_arch: str, device_capability: tuple[int, int]
+) -> bool:
+    match = re.fullmatch(r"sm_(\d+)", compiled_arch)
+    if match is None:
+        return False
+    compiled_capability = divmod(int(match.group(1)), 10)
+    return (
+        compiled_capability[0] == device_capability[0]
+        and compiled_capability[1] <= device_capability[1]
+    )
+
+
 def _validate_gpu_environment(
     torch: Any, config: Dict[str, Any], context: DistributedContext
 ) -> Dict[str, Any]:
@@ -638,10 +651,15 @@ def _validate_gpu_environment(
         raise RuntimeError(
             f"GPU has less than {expected['minimum_memory_gib']} GiB of memory"
         )
-    if expected["required_arch"] not in torch.cuda.get_arch_list():
+    compiled_arches = tuple(torch.cuda.get_arch_list())
+    if not any(
+        _cuda_binary_arch_is_compatible(arch, capability)
+        for arch in compiled_arches
+    ):
         raise RuntimeError(
-            "installed PyTorch wheel does not include "
-            f"{expected['required_arch']} kernels"
+            "installed PyTorch wheel does not include kernels compatible with "
+            f"{expected['required_arch']}; compiled architectures: "
+            f"{list(compiled_arches)}"
         )
     bf16_supported = bool(torch.cuda.is_bf16_supported())
     if config["training"]["precision"] == "bf16" and not bf16_supported:
