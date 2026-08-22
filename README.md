@@ -208,9 +208,11 @@ commits ou documentação.
 
 O perfil `smoke` usa `remove_exact` automaticamente e grava
 `boilerplate_report.json` sem interromper a execução. No perfil `mvp`,
-`filters.boilerplate.decision_by_profile.mvp` começa como `pending`: a passagem
-produz o mesmo relatório agregado, encerra com status de revisão e não publica
-shards finais. Após revisar suas contagens, configure uma decisão explícita:
+as contagens agregadas foram revisadas e a decisão versionada em
+`filters.boilerplate.decision_by_profile.mvp` é `remove_exact`. O valor
+`pending` permanece como gate de revisão: produz o mesmo relatório agregado,
+encerra com status de revisão e não publica shards finais. As decisões finais
+possíveis são:
 
 - `keep`: mantém o texto dos candidatos;
 - `remove_exact`: remove parágrafos exatos com pelo menos 80 caracteres,

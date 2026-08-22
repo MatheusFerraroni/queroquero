@@ -51,10 +51,11 @@ rejeitada.
 ## Boilerplate exato
 
 No perfil `smoke`, a decisão é `remove_exact`: o filtro é aplicado e a execução
-continua normalmente. No perfil `mvp`, a decisão inicial é `pending`; a execução
-gera `boilerplate_report.json` e bloqueia a publicação dos shards finais. O
-relatório v2 contém somente contagens agregadas, sem exemplos, hashes de blocos
-ou conteúdo da fonte.
+continua normalmente. No perfil `mvp`, as contagens agregadas foram revisadas e
+a decisão versionada também é `remove_exact`. O valor `pending` permanece como
+gate para uma nova revisão: gera `boilerplate_report.json` e bloqueia a
+publicação dos shards finais. O relatório v2 contém somente contagens
+agregadas, sem exemplos, hashes de blocos ou conteúdo da fonte.
 
 São detectadas duas classes conservadoras de repetição exata:
 
@@ -74,8 +75,9 @@ aproximada. Após a remoção, documentos afetados são descartados se restarem
 menos de 300 caracteres ou se mais de 80% do texto normalizado tiver sido
 removido.
 
-Depois da revisão, altere `filters.boilerplate.decision_by_profile.mvp` em
-`configs/datasets/wackywacky.json` para uma opção explícita:
+A decisão atual fica em `filters.boilerplate.decision_by_profile.mvp` de
+`configs/datasets/wackywacky.json`. Depois de uma nova revisão, escolha uma
+opção final explícita:
 
 - `keep`: preserva o texto dos candidatos;
 - `remove_exact`: aplica apenas as duas regras exatas documentadas.

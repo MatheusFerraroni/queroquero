@@ -74,7 +74,7 @@
       "schema_version": 4,
       "decision_by_profile": {
         "smoke": "remove_exact",
-        "mvp": "pending"
+        "mvp": "remove_exact"
       },
       "cross_domain_paragraphs": {
         "minimum_characters": 80,

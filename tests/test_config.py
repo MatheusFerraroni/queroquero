@@ -101,8 +101,14 @@ class ConfigTest(unittest.TestCase):
                 load_resolved_config("brwac", "smoke", root)
 
     def test_only_wacky_post_scan_decision_reuses_the_scan_cache(self) -> None:
-        pending, _ = load_resolved_config("wackywacky", "mvp")
-        keep = deepcopy(pending)
+        remove_exact, _ = load_resolved_config("wackywacky", "mvp")
+        self.assertEqual(
+            remove_exact["dataset"]["filters"]["boilerplate"][
+                "decision_by_profile"
+            ]["mvp"],
+            "remove_exact",
+        )
+        keep = deepcopy(remove_exact)
         keep["dataset"]["filters"]["boilerplate"]["decision_by_profile"][
             "mvp"
         ] = "keep"
@@ -111,7 +117,9 @@ class ConfigTest(unittest.TestCase):
             "within_domain_blocks"
         ]["minimum_documents"] = 6
 
-        self.assertEqual(scan_config_sha256(pending), scan_config_sha256(keep))
+        self.assertEqual(
+            scan_config_sha256(remove_exact), scan_config_sha256(keep)
+        )
         self.assertNotEqual(
             scan_config_sha256(keep), scan_config_sha256(changed_threshold)
         )
