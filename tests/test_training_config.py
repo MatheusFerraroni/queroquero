@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from queroquero.training_config import (
+    REAL_TRAINING_CONFIG_SCHEMA,
     TRAINING_CONFIG_SCHEMA,
     TrainingConfigError,
     load_training_config,
@@ -17,6 +18,33 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class TrainingConfigTests(unittest.TestCase):
+    def _real_config(self):
+        config = json.loads(
+            (PROJECT_ROOT / "configs/training/l40s-mvp.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        config["schema_version"] = REAL_TRAINING_CONFIG_SCHEMA
+        config["profile"] = "real"
+        config["data_mixture"] = {
+            "policy": "equal_share_without_replacement",
+            "without_replacement": True,
+            "allocation_sha256": "a" * 64,
+        }
+        budgets = [69_334, 69_334, 69_333, 69_333, 69_333, 69_333]
+        for entry, budget in zip(config["datasets"], budgets):
+            entry.pop("weight")
+            entry["train_sequences"] = budget
+            entry["eval_sequences"] = 256
+        config["training"].update(
+            {
+                "warmup_steps": 520,
+                "checkpoint_steps": [13_000, 26_000, 39_000],
+                "total_optimizer_steps": 52_000,
+            }
+        )
+        return config
+
     def test_versioned_configs_match_the_fixed_budgets(self) -> None:
         smoke, smoke_digest = load_training_config(
             "configs/training/p100-smoke.json"
@@ -69,6 +97,25 @@ class TrainingConfigTests(unittest.TestCase):
         changed_budget["datasets"][0]["train_sequences"] = 128
         with self.assertRaisesRegex(TrainingConfigError, "budgets"):
             validate_training_config(changed_budget)
+
+    def test_real_v3_contract_accepts_unequal_no_replacement_allocation(self) -> None:
+        config = self._real_config()
+        validate_training_config(config)
+        self.assertEqual(
+            sum(entry["train_sequences"] for entry in config["datasets"]),
+            416_000,
+        )
+        self.assertEqual(config["training"]["global_batch_tokens"], 8192)
+
+        changed = deepcopy(config)
+        changed["datasets"][0]["train_sequences"] -= 1
+        with self.assertRaisesRegex(TrainingConfigError, "416000"):
+            validate_training_config(changed)
+
+        replacement = deepcopy(config)
+        replacement["data_mixture"]["without_replacement"] = False
+        with self.assertRaisesRegex(TrainingConfigError, "without replacement"):
+            validate_training_config(replacement)
 
     def test_training_contract_rejects_non_p100_or_bf16(self) -> None:
         config = json.loads(

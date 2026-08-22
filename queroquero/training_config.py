@@ -16,8 +16,12 @@ from .config import (
 
 
 TRAINING_CONFIG_SCHEMA = "queroquero-training-config/v2"
+REAL_TRAINING_CONFIG_SCHEMA = "queroquero-training-config/v3"
 TRAINING_METHOD = "full_parameter_continual_pretraining"
 TRAINING_DATASET_IDS = tuple(sorted(DATASET_IDS))
+REAL_TRAINING_SEQUENCES = 416_000
+REAL_EVAL_SEQUENCES_PER_DATASET = 256
+REAL_OPTIMIZER_STEPS = 52_000
 
 
 class TrainingConfigError(ValueError):
@@ -50,6 +54,14 @@ def load_training_config(path: str | Path) -> tuple[Dict[str, Any], str]:
 
 
 def validate_training_config(config: Dict[str, Any]) -> None:
+    schema = config.get("schema_version")
+    legacy = schema == TRAINING_CONFIG_SCHEMA
+    real = schema == REAL_TRAINING_CONFIG_SCHEMA
+    if not legacy and not real:
+        raise TrainingConfigError(
+            "training schema must be "
+            f"{TRAINING_CONFIG_SCHEMA!r} or {REAL_TRAINING_CONFIG_SCHEMA!r}"
+        )
     expected_top_level = {
         "schema_version",
         "profile",
@@ -60,15 +72,15 @@ def validate_training_config(config: Dict[str, Any]) -> None:
         "hardware",
         "output",
     }
+    if real:
+        expected_top_level.add("data_mixture")
     if set(config) != expected_top_level:
         raise TrainingConfigError("training configuration keys are incomplete or unknown")
-    if config.get("schema_version") != TRAINING_CONFIG_SCHEMA:
-        raise TrainingConfigError(
-            f"training schema must be {TRAINING_CONFIG_SCHEMA!r}"
-        )
     profile = config.get("profile")
-    if profile not in {"smoke", "mvp"}:
-        raise TrainingConfigError("training profile must be smoke or mvp")
+    if legacy and profile not in {"smoke", "mvp"}:
+        raise TrainingConfigError("v2 training profile must be smoke or mvp")
+    if real and profile != "real":
+        raise TrainingConfigError("v3 training profile must be real")
 
     model = _mapping(config, "model")
     expected_model = {
@@ -91,35 +103,73 @@ def validate_training_config(config: Dict[str, Any]) -> None:
     for entry in datasets:
         if not isinstance(entry, dict):
             raise TrainingConfigError("each dataset entry must be an object")
-        if set(entry) != {
+        expected_entry_keys = {
             "dataset_id",
-            "weight",
             "train_sequences",
             "eval_sequences",
-        }:
+        }
+        if legacy:
+            expected_entry_keys.add("weight")
+        if set(entry) != expected_entry_keys:
             raise TrainingConfigError("dataset entry keys are incomplete or unknown")
         dataset_id = entry.get("dataset_id")
         if dataset_id not in TRAINING_DATASET_IDS or dataset_id in seen:
             raise TrainingConfigError("dataset IDs must be unique and known")
         seen.add(dataset_id)
-        if not _matches_exact(entry.get("weight"), 1):
+        if legacy and not _matches_exact(entry.get("weight"), 1):
             raise TrainingConfigError("all dataset weights must be exactly one")
-        if (
-            not _matches_exact(entry.get("train_sequences"), expected_sequences[0])
-            or not _matches_exact(
-                entry.get("eval_sequences"), expected_sequences[1]
-            )
-        ):
-            raise TrainingConfigError(
-                f"dataset budgets do not match the {profile} preparation profile"
-            )
+        if legacy:
+            if (
+                not _matches_exact(
+                    entry.get("train_sequences"), expected_sequences[0]
+                )
+                or not _matches_exact(
+                    entry.get("eval_sequences"), expected_sequences[1]
+                )
+            ):
+                raise TrainingConfigError(
+                    f"dataset budgets do not match the {profile} preparation profile"
+                )
+        else:
+            _positive_int(entry, "train_sequences")
+            if not _matches_exact(
+                entry.get("eval_sequences"), REAL_EVAL_SEQUENCES_PER_DATASET
+            ):
+                raise TrainingConfigError(
+                    "real evaluation budget must be 256 sequences per dataset"
+                )
         train_total += entry["train_sequences"]
     if seen != set(TRAINING_DATASET_IDS):
         raise TrainingConfigError("training configuration omits a dataset")
+    if real:
+        mixture = _mapping(config, "data_mixture")
+        if set(mixture) != {
+            "policy",
+            "without_replacement",
+            "allocation_sha256",
+        }:
+            raise TrainingConfigError("real data_mixture keys are incomplete or unknown")
+        if mixture.get("policy") != "equal_share_without_replacement":
+            raise TrainingConfigError(
+                "real data mixture must use equal_share_without_replacement"
+            )
+        if mixture.get("without_replacement") is not True:
+            raise TrainingConfigError("real training must be without replacement")
+        allocation_sha256 = mixture.get("allocation_sha256")
+        if not isinstance(allocation_sha256, str) or not _is_sha256(
+            allocation_sha256
+        ):
+            raise TrainingConfigError("real allocation_sha256 must be a SHA-256")
+        if train_total != REAL_TRAINING_SEQUENCES:
+            raise TrainingConfigError(
+                f"real training allocation must total {REAL_TRAINING_SEQUENCES}"
+            )
 
     execution = _mapping(config, "execution")
     hardware = _mapping(config, "hardware")
     target = _hardware_target(execution, hardware)
+    if real and target != "l40s":
+        raise TrainingConfigError("real training is restricted to 2x L40S")
     training = _mapping(config, "training")
     common = {
         "method": TRAINING_METHOD,
@@ -181,12 +231,20 @@ def validate_training_config(config: Dict[str, Any]) -> None:
     expected_steps = train_total // training["global_batch_sequences"]
     if not _matches_exact(training.get("total_optimizer_steps"), expected_steps):
         raise TrainingConfigError("total_optimizer_steps does not match dataset budgets")
-    expected_warmup = 1 if profile == "smoke" else 20
+    expected_warmup = (
+        520 if real else (1 if profile == "smoke" else 20)
+    )
     if not _matches_exact(training.get("warmup_steps"), expected_warmup):
         raise TrainingConfigError("warmup_steps does not match the fixed profile")
-    expected_checkpoints = [expected_steps // 2]
+    expected_checkpoints = (
+        [13_000, 26_000, 39_000] if real else [expected_steps // 2]
+    )
     if not _matches_exact(training.get("checkpoint_steps"), expected_checkpoints):
-        raise TrainingConfigError("checkpoint must be exactly at the half epoch")
+        raise TrainingConfigError("checkpoint steps do not match the fixed profile")
+    if real and expected_steps != REAL_OPTIMIZER_STEPS:
+        raise TrainingConfigError(
+            f"real training must use exactly {REAL_OPTIMIZER_STEPS} optimizer steps"
+        )
 
     output = _mapping(config, "output")
     if set(output) != {"runs_root", "checkpoints_root", "artifacts_root"}:
@@ -281,3 +339,13 @@ def _matches_exact(value: Any, expected: Any) -> bool:
             )
         )
     return type(value) is type(expected) and value == expected
+
+
+def _positive_int(config: Dict[str, Any], key: str) -> None:
+    value = config.get(key)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise TrainingConfigError(f"{key} must be a positive integer")
+
+
+def _is_sha256(value: str) -> bool:
+    return len(value) == 64 and all(character in "0123456789abcdef" for character in value)

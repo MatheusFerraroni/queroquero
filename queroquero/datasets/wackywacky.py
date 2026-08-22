@@ -425,9 +425,10 @@ def _validate_config(
     expected_selection = {
         "smoke": "engineering_prefix",
         "mvp": "representative",
+        "real": "representative",
     }.get(profile_name)
     if expected_selection is None:
-        raise ConfigError("WackyWacky profile_name must be smoke or mvp")
+        raise ConfigError("WackyWacky profile_name must be smoke, mvp, or real")
     if selection != expected_selection:
         raise ConfigError(
             f"WackyWacky {profile_name} selection must be {expected_selection}"
@@ -784,8 +785,9 @@ def _boilerplate_rules(
         raise ConfigError(
             "boilerplate mvp decision must be pending, keep, or remove_exact"
         )
-    if profile_name not in decisions:
-        raise ConfigError("boilerplate profile must be smoke or mvp")
+    decision_profile = "mvp" if profile_name == "real" else profile_name
+    if decision_profile not in decisions:
+        raise ConfigError("boilerplate profile must be smoke, mvp, or real")
 
     cross_domain = value.get("cross_domain_paragraphs")
     within_domain = value.get("within_domain_blocks")
@@ -858,7 +860,7 @@ def _boilerplate_rules(
             "be below 300"
         )
     return {
-        "decision": decisions[profile_name],
+        "decision": decisions[decision_profile],
         "paragraph_minimum_characters": paragraph_minimum_characters,
         "paragraph_minimum_documents": paragraph_minimum_documents,
         "paragraph_minimum_domains": paragraph_minimum_domains,

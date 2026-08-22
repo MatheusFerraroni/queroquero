@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import re
 import shutil
+from itertools import islice
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -83,6 +84,85 @@ def write_split(
             }
         )
     return shards
+
+
+def write_split_incremental(
+    output_dir: Path,
+    split: str,
+    records: Iterable[PackedSequence],
+    sequences_per_shard: int,
+) -> List[Dict[str, Any]]:
+    """Write a bounded iterable shard by shard and reuse identical completed shards."""
+
+    if not isinstance(sequences_per_shard, int) or isinstance(
+        sequences_per_shard, bool
+    ) or sequences_per_shard < 1:
+        raise ValueError("sequences_per_shard must be a positive integer")
+    if split not in {"train", "eval"}:
+        raise ValueError("split must be train or eval")
+    split_dir = output_dir / split
+    split_dir.mkdir(parents=True, exist_ok=True)
+    shards: List[Dict[str, Any]] = []
+    iterator = iter(records)
+    shard_index = 0
+    while True:
+        chunk = list(islice(iterator, sequences_per_shard))
+        if not chunk:
+            break
+        filename = f"shard-{shard_index:05d}.parquet"
+        final_path = split_dir / filename
+        partial_path = split_dir / f".{filename}.partial"
+        table = _records_table(chunk)
+        if final_path.exists():
+            if final_path.is_symlink():
+                raise RuntimeError("existing Parquet shard must not be a symlink")
+            validate_shard(final_path)
+            if not pq.read_table(final_path).equals(table):
+                raise RuntimeError(
+                    f"existing resumable shard changed: {final_path.name}"
+                )
+        else:
+            try:
+                pq.write_table(
+                    table,
+                    partial_path,
+                    compression="zstd",
+                    version="2.6",
+                    use_dictionary=False,
+                    write_statistics=True,
+                )
+                validate_shard(partial_path)
+                partial_path.replace(final_path)
+            except Exception:
+                partial_path.unlink(missing_ok=True)
+                raise
+        shards.append(
+            {
+                "path": final_path.relative_to(output_dir).as_posix(),
+                "rows": len(chunk),
+                "tokens": len(chunk) * 1024,
+                "size_bytes": final_path.stat().st_size,
+                "sha256": file_sha256(final_path),
+            }
+        )
+        shard_index += 1
+    return shards
+
+
+def _records_table(records: Sequence[PackedSequence]) -> pa.Table:
+    return pa.Table.from_pydict(
+        {
+            "sequence_id": [record.sequence_id for record in records],
+            "input_ids": [list(record.input_ids) for record in records],
+            "source_ref_sha256": [
+                list(record.source_ref_sha256) for record in records
+            ],
+            "source_token_counts": [
+                list(record.source_token_counts) for record in records
+            ],
+        },
+        schema=PARQUET_SCHEMA,
+    )
 
 
 def validate_shard(path: Path) -> int:

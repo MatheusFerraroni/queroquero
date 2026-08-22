@@ -41,9 +41,10 @@ class MultiWOZPTBRAdapter:
         seed = _seed(config)
         candidate_limit = _positive_int(profile, "candidate_documents")
         checkpoint_every = _positive_int(source, "checkpoint_every", default=128)
-        selection_sha256 = stable_hash(
-            "multiwoz-selection/v1", seed, candidate_limit
-        )
+        selection_identity = ["multiwoz-selection/v1", seed]
+        if "capacity_audit" not in config:
+            selection_identity.append(candidate_limit)
+        selection_sha256 = stable_hash(*selection_identity)
 
         source_root = resolve_dataset_root(config)
         source_directory = _safe_source_path(

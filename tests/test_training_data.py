@@ -6,15 +6,127 @@ from unittest.mock import patch
 
 from queroquero.training_config import load_training_config
 from queroquero.training_data import (
+    LazyTrainingSequenceStore,
     ResolvedDataset,
     ResolvedTrainingInputs,
     TrainingSequence,
+    TrainingSequenceReference,
+    build_real_training_references,
+    load_split,
     load_training_sequences,
     resolve_training_inputs,
 )
+from queroquero.packing import PackedSequence
+from queroquero.storage import write_split
 
 
 class TrainingDataTests(unittest.TestCase):
+    def test_real_schedule_is_proportional_deterministic_and_without_replacement(self) -> None:
+        counts = [2, 3, 4, 5, 6, 7]
+        dataset_ids = (
+            "adrenaline",
+            "brwac",
+            "gigaverbo",
+            "multiwoz_ptbr",
+            "outerspace",
+            "wackywacky",
+        )
+        datasets = tuple(
+            ResolvedDataset(
+                dataset_id=dataset_id,
+                root=Path("/synthetic") / dataset_id,
+                manifest={
+                    "preparation_id": f"{count:020x}",
+                    "resolved_config_sha256": "c" * 64,
+                    "counts": {
+                        "train_sequences": count,
+                        "eval_sequences": 256,
+                        "train_tokens": count * 1024,
+                        "eval_tokens": 256 * 1024,
+                    },
+                },
+                manifest_sha256="a" * 64,
+                relative_manifest_path=f"{dataset_id}/manifest.json",
+            )
+            for dataset_id, count in zip(dataset_ids, counts)
+        )
+        inputs = ResolvedTrainingInputs(
+            profile="real",
+            output_root=Path("/synthetic"),
+            datasets=datasets,
+            tokenizer={
+                "model_id": "model",
+                "revision": "revision",
+                "fingerprint_sha256": "f" * 64,
+                "vocab_size": 49_152,
+                "bos_token_id": 1,
+                "eos_token_id": 2,
+                "pad_token_id": 49_109,
+                "unk_token_id": 0,
+            },
+            data_mixture={
+                "policy": "equal_share_without_replacement",
+                "without_replacement": True,
+                "allocation_sha256": "b" * 64,
+            },
+        )
+
+        first = build_real_training_references(inputs, 42)
+        second = build_real_training_references(inputs, 42)
+        self.assertEqual(first, second)
+        self.assertEqual(len(first), sum(counts))
+        self.assertEqual(len(set(first)), len(first))
+        for dataset_id, count in zip(dataset_ids, counts):
+            self.assertEqual(
+                sum(item.dataset_id == dataset_id for item in first), count
+            )
+        metadata = inputs.metadata()
+        self.assertEqual(
+            metadata["allocated_train_tokens"], sum(counts) * 1024
+        )
+        self.assertEqual(
+            metadata["data_mixture"]["policy"],
+            "equal_share_without_replacement",
+        )
+
+    def test_lazy_loader_matches_the_eager_parquet_loader(self) -> None:
+        records = [
+            PackedSequence(
+                sequence_id=f"{index + 1:064x}",
+                input_ids=(index + 4,) * 1024,
+                source_ref_sha256=(f"{index + 100:064x}",),
+                source_token_counts=(1024,),
+            )
+            for index in range(5)
+        ]
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            shards = write_split(root, "train", records, 2)
+            dataset = ResolvedDataset(
+                dataset_id="adrenaline",
+                root=root,
+                manifest={
+                    "counts": {"train_sequences": 5},
+                    "splits": {"train": shards},
+                    "tokenizer": {"vocab_size": 49_152},
+                },
+                manifest_sha256="a" * 64,
+                relative_manifest_path="adrenaline/manifest.json",
+            )
+            inputs = ResolvedTrainingInputs(
+                profile="real",
+                output_root=root,
+                datasets=(dataset,),
+                tokenizer={},
+            )
+            eager = load_split(dataset, "train")
+            store = LazyTrainingSequenceStore(inputs)
+            lazy = [
+                store.load(TrainingSequenceReference("adrenaline", index))
+                for index in range(5)
+            ]
+            self.assertEqual(lazy, eager)
+
     def test_balanced_schedule_is_deterministic_and_exact(self) -> None:
         config, _ = load_training_config("configs/training/p100-smoke.json")
         datasets = tuple(

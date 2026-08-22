@@ -31,7 +31,7 @@ from .training_data import (
     ResolvedTrainingInputs,
     TrainingSequence,
     load_evaluation_sequences,
-    load_training_sequences,
+    load_training_schedule,
     resolve_training_inputs,
 )
 from .training_distributed import (
@@ -79,7 +79,7 @@ def run_preflight(config_path: str | Path) -> Dict[str, Any] | None:
             num_warmup_steps=0,
             num_training_steps=1,
         )
-        train_sequences = load_training_sequences(
+        train_sequences = load_training_schedule(
             inputs, config["training"]["seed"]
         )
         training = config["training"]
@@ -319,7 +319,7 @@ def run_training(
             run_manifest["baseline_evaluation"] = baseline
             run_manifest["status"] = "training"
 
-        training_sequences = load_training_sequences(
+        training_sequences = load_training_schedule(
             inputs, config["training"]["seed"]
         )
         training = config["training"]
@@ -337,22 +337,17 @@ def run_training(
                 total_steps,
                 context.world_size,
             )
+        pending_step_metrics: list[Dict[str, Any]] = []
         for optimizer_step in range(start_step + 1, total_steps + 1):
             global_batch = global_step_batch(
                 training_sequences, optimizer_step, global_batch_size
             )
-            local_batch = rank_step_batch(
-                training_sequences,
-                optimizer_step,
-                rank=context.rank,
-                world_size=context.world_size,
-                micro_batch_size_per_rank=training[
-                    "micro_batch_size_per_rank"
-                ],
-                accumulation_steps_per_rank=training[
-                    "gradient_accumulation_steps_per_rank"
-                ],
+            local_batch_size = (
+                training["micro_batch_size_per_rank"]
+                * training["gradient_accumulation_steps_per_rank"]
             )
+            local_start = context.rank * local_batch_size
+            local_batch = global_batch[local_start : local_start + local_batch_size]
             step_metrics = _train_optimizer_step(
                 model=model,
                 base_model=base_model,
@@ -378,9 +373,23 @@ def run_training(
             )
             run_manifest["optimizer_steps_completed"] = optimizer_step
             run_manifest["status"] = "training"
+            if config["profile"] == "real" and context.is_main:
+                pending_step_metrics.append(step_metrics)
+
+            checkpoint_step = optimizer_step in training["checkpoint_steps"]
+            summarized = (
+                config["profile"] != "real"
+                or optimizer_step % 100 == 0
+                or checkpoint_step
+                or optimizer_step == total_steps
+            )
 
             def record_optimizer_step() -> bool:
-                _append_metric(metrics_path, step_metrics)
+                if config["profile"] == "real":
+                    _append_metrics(metrics_path, pending_step_metrics)
+                    pending_step_metrics.clear()
+                else:
+                    _append_metric(metrics_path, step_metrics)
                 write_json_atomic(run_manifest_path, run_manifest)
                 LOGGER.info(
                     "stage=train status=step run_id=%s optimizer_step=%d "
@@ -392,9 +401,10 @@ def run_training(
                 )
                 return True
 
-            _run_on_main(context, record_optimizer_step)
+            if summarized:
+                _run_on_main(context, record_optimizer_step)
 
-            scheduled = optimizer_step in training["checkpoint_steps"]
+            scheduled = checkpoint_step
             interrupted = _interruption_requested(context)
             if scheduled or interrupted:
                 checkpoint = _save_checkpoint(
@@ -410,6 +420,9 @@ def run_training(
                 )
 
                 def record_checkpoint() -> bool:
+                    if pending_step_metrics:
+                        _append_metrics(metrics_path, pending_step_metrics)
+                        pending_step_metrics.clear()
                     _append_metric(
                         metrics_path,
                         {
@@ -419,6 +432,7 @@ def run_training(
                             "reason": "signal" if interrupted else "scheduled",
                         },
                     )
+                    write_json_atomic(run_manifest_path, run_manifest)
                     return True
 
                 _run_on_main(context, record_checkpoint)
@@ -497,7 +511,7 @@ def run_training(
         _run_on_main(context, record_final_evaluation)
 
         artifact_metadata = None
-        if config["profile"] == "mvp":
+        if config["profile"] in {"mvp", "real"}:
             training_provenance = {
                 "method": TRAINING_METHOD,
                 "git_commit": git_commit,
@@ -516,6 +530,18 @@ def run_training(
                     for dataset in inputs.datasets
                 ],
             }
+            if config["profile"] == "real":
+                training_provenance["profile"] = "real"
+                training_provenance["data_mixture"] = config["data_mixture"]
+                for item, dataset in zip(
+                    training_provenance["datasets"], inputs.datasets
+                ):
+                    item["train_sequences"] = dataset.manifest["counts"][
+                        "train_sequences"
+                    ]
+                    item["eval_sequences"] = dataset.manifest["counts"][
+                        "eval_sequences"
+                    ]
 
             def export_artifact() -> Dict[str, Any]:
                 LOGGER.info("stage=export status=started run_id=%s", run_id)
@@ -1355,18 +1381,23 @@ def _load_run_manifest(path: Path, run_id: str) -> Dict[str, Any]:
 
 
 def _append_metric(path: Path, record: Dict[str, Any]) -> None:
+    _append_metrics(path, [record])
+
+
+def _append_metrics(path: Path, records: Iterable[Dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(
-            json.dumps(
-                record,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
+        for record in records:
+            handle.write(
+                json.dumps(
+                    record,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
             )
-        )
-        handle.write("\n")
+            handle.write("\n")
         handle.flush()
         os.fsync(handle.fileno())
 

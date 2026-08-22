@@ -159,8 +159,15 @@ def validate_dataset_config(config: Dict[str, Any], expected_id: str) -> None:
     _mapping(config, "source")
     _mapping(config, "filters")
     profiles = _mapping(config, "profiles")
-    if set(profiles) != {"smoke", "mvp"}:
-        raise ConfigError("profiles must contain exactly smoke and mvp")
+    if set(profiles) not in (
+        {"smoke", "mvp"},
+        {"smoke", "mvp", "real"},
+    ):
+        raise ConfigError("profiles must contain smoke/mvp and optionally real")
+    for profile_name, profile in profiles.items():
+        if not isinstance(profile, dict):
+            raise ConfigError(f"profile {profile_name!r} must be an object")
+        validate_profile(profile, profile_name)
 
 
 def validate_profile(profile: Dict[str, Any], name: str) -> None:
@@ -178,6 +185,18 @@ def validate_profile(profile: Dict[str, Any], name: str) -> None:
         profile["train_sequences"] != 256 or profile["eval_sequences"] != 32
     ):
         raise ConfigError("mvp profile must use 256 train and 32 eval sequences")
+    if name == "real":
+        if profile["eval_sequences"] != 256:
+            raise ConfigError("real profile must use 256 evaluation sequences")
+        if selection != "representative":
+            raise ConfigError("real profile must use representative selection")
+        if profile.get("allocation_policy") != (
+            "equal_share_without_replacement"
+        ) or profile.get("without_replacement") is not True:
+            raise ConfigError("real profile must prohibit replacement")
+        digest = profile.get("allocation_sha256")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ConfigError("real profile allocation_sha256 must be a SHA-256")
 
 
 def resolve_project_path(value: str) -> Path:

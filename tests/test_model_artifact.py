@@ -63,6 +63,21 @@ class ModelArtifactTests(unittest.TestCase):
             self.assertEqual(manifest["training"]["execution"]["world_size"], 2)
             self.assertNotIn("bitsandbytes", manifest["environment"])
 
+    def test_real_artifact_accepts_positive_generalized_training_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = self._write_artifact(
+                Path(temporary_dir), target="l40s", real=True
+            )
+            manifest = validate_model_artifact(root, load_model=False)
+            self.assertEqual(manifest["training"]["optimizer_steps"], 52_000)
+            self.assertEqual(
+                sum(
+                    item["train_sequences"]
+                    for item in manifest["training"]["datasets"]
+                ),
+                416_000,
+            )
+
     def _write_artifact(
         self,
         parent: Path,
@@ -70,6 +85,7 @@ class ModelArtifactTests(unittest.TestCase):
         target: str = "p100",
         include_special_tokens_map: bool = False,
         include_tokenizer_json: bool = True,
+        real: bool = False,
     ) -> Path:
         executions = {
             "p100": {
@@ -115,6 +131,18 @@ class ModelArtifactTests(unittest.TestCase):
                 for index, dataset_id in enumerate(DATASET_IDS)
             ],
         }
+        if real:
+            training["optimizer_steps"] = 52_000
+            training["profile"] = "real"
+            training["data_mixture"] = {
+                "policy": "equal_share_without_replacement",
+                "without_replacement": True,
+                "allocation_sha256": "a" * 64,
+            }
+            budgets = [69_334, 69_334, 69_333, 69_333, 69_333, 69_333]
+            for item, budget in zip(training["datasets"], budgets):
+                item["train_sequences"] = budget
+                item["eval_sequences"] = 256
         artifact_id = _expected_artifact_id(training)
         root = parent / artifact_id
         root.mkdir()

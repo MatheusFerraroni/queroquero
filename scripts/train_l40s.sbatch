@@ -96,6 +96,18 @@ case "${MODE}" in
   mvp-resume)
     run_ddp run --config configs/training/l40s-mvp.json --resume
     ;;
+  real-preflight)
+    run_ddp preflight --config \
+      "${REAL_TRAINING_CONFIG:-configs/training/l40s-real.json}"
+    ;;
+  real)
+    run_ddp run --config \
+      "${REAL_TRAINING_CONFIG:-configs/training/l40s-real.json}"
+    ;;
+  real-resume)
+    run_ddp run --config \
+      "${REAL_TRAINING_CONFIG:-configs/training/l40s-real.json}" --resume
+    ;;
   validate)
     if [[ -z "${MODEL_ARTIFACT_PATH:-}" ]]; then
       echo "Erro: MODEL_ARTIFACT_PATH é obrigatório no modo validate." >&2
@@ -105,7 +117,7 @@ case "${MODE}" in
       --artifact "${MODEL_ARTIFACT_PATH}"
     ;;
   *)
-    echo "Uso: $0 {preflight|smoke-stop|smoke-resume|mvp|mvp-resume|validate}" >&2
+    echo "Uso: $0 {preflight|smoke-stop|smoke-resume|mvp|mvp-resume|real-preflight|real|real-resume|validate}" >&2
     exit 2
     ;;
 esac

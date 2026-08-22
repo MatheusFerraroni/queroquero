@@ -5,6 +5,7 @@ from queroquero.packing import (
     TokenizedDocument,
     clean_deduplicate_and_tokenize,
     pack_for_budgets,
+    plan_incremental_packing,
 )
 
 
@@ -26,6 +27,54 @@ class FakeTokenizer:
 
 
 class PackingTest(unittest.TestCase):
+    def test_incremental_packing_matches_the_legacy_packer_byte_for_byte(self) -> None:
+        documents = [
+            Document(
+                text=f"Documento incremental distinto {index}. " * 90,
+                source_ref=f"synthetic:{index}",
+                source_position={"index": index},
+            )
+            for index in range(30)
+        ]
+        tokenizer = FakeTokenizer()
+        tokenized, legacy_metrics = clean_deduplicate_and_tokenize(
+            documents,
+            tokenizer,
+            dataset_id="synthetic",
+            seed=42,
+            min_characters=20,
+        )
+        legacy = pack_for_budgets(
+            tokenized,
+            dataset_id="synthetic",
+            seed=42,
+            sequence_length=1024,
+            train_sequences=8,
+            eval_sequences=2,
+        )
+        incremental = plan_incremental_packing(
+            documents,
+            tokenizer,
+            dataset_id="synthetic",
+            seed=42,
+            sequence_length=1024,
+            train_sequences=8,
+            eval_sequences=2,
+            min_characters=20,
+        )
+
+        self.assertEqual(tuple(incremental.train), legacy.train)
+        self.assertEqual(tuple(incremental.evaluation), legacy.evaluation)
+        self.assertEqual(incremental.tokenization_metrics, legacy_metrics)
+        self.assertEqual(
+            incremental.train.discarded_tail_tokens,
+            legacy.metrics["train_discarded_tail_tokens"],
+        )
+        self.assertEqual(
+            incremental.evaluation.tokens_not_selected_by_sequence_budget,
+            legacy.metrics["eval_tokens_not_selected_by_sequence_budget"],
+        )
+
     def test_eos_is_always_appended_as_an_explicit_document_boundary(self) -> None:
         class EndsInEosTokenizer(FakeTokenizer):
             def __call__(self, text, add_special_tokens=False):

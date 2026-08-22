@@ -5,7 +5,12 @@ from pathlib import Path
 
 from queroquero.datasets.base import Document
 from queroquero.packing import PackedSequence
-from queroquero.storage import WorkStore, validate_shard, write_split
+from queroquero.storage import (
+    WorkStore,
+    validate_shard,
+    write_split,
+    write_split_incremental,
+)
 
 
 def sequence(index):
@@ -18,6 +23,25 @@ def sequence(index):
 
 
 class StorageTest(unittest.TestCase):
+    def test_incremental_writer_reuses_identical_completed_shards(self) -> None:
+        records = [sequence(index) for index in range(5)]
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            first = write_split_incremental(root, "train", iter(records), 2)
+            mtimes = {
+                record["path"]: (root / record["path"]).stat().st_mtime_ns
+                for record in first
+            }
+            second = write_split_incremental(root, "train", iter(records), 2)
+            self.assertEqual(first, second)
+            self.assertEqual(
+                mtimes,
+                {
+                    record["path"]: (root / record["path"]).stat().st_mtime_ns
+                    for record in second
+                },
+            )
+
     def test_parquet_is_deterministic_and_valid(self) -> None:
         records = [sequence(index) for index in range(3)]
         with tempfile.TemporaryDirectory() as temporary_dir:

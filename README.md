@@ -167,6 +167,11 @@ somente `.venv/bin/python` e mantêm o cache do `uv` em `cache/uv` por padrão.
 | `scripts/submit_l40s.sh` | Submeter duas L40S na partição `l40s`, sem fixar nó. |
 | `scripts/train_l40s.sbatch` | Executar os modos distribuídos com `torchrun`. |
 
+O fluxo de auditoria, alocação sem reposição e treino real de aproximadamente
+12 horas está em [`docs/training-real-l40s.md`](docs/training-real-l40s.md). Os
+budgets `real` só são versionados depois que os seis relatórios de capacidade
+do cluster forem alocados; até lá, os modos reais do Slurm falham fechados.
+
 Execute todos os smoke tests de preparação:
 
 ```sh

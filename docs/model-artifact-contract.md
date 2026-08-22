@@ -58,7 +58,7 @@ métricas detalhadas e checkpoints de retomada não pertencem ao artefato.
 | `parent_model` | model ID, revisão e licença |
 | `architecture` | model type, parâmetros, contextos 4.096/1.024 |
 | `tokenizer` | fingerprint, vocab size e IDs especiais |
-| `training` | método, commit, run ID, seed, estratégia, world size, batch, precisão, otimizador e hashes de config/dataset |
+| `training` | método, commit, run ID, seed, passos positivos, estratégia, world size, batch, precisão, otimizador e hashes de config/dataset; no perfil real, política sem reposição e alocações por dataset |
 | `environment` | versões de Python, torch, transformers e tokenizers |
 | `files` | path relativo, bytes e SHA-256 de cada arquivo |
 | `artifact_sha256` | hash agregado |

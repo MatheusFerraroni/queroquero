@@ -328,8 +328,34 @@ def _validate_training_provenance(training: Any) -> None:
         raise RuntimeError("model artifact training provenance is missing")
     if training.get("method") != "full_parameter_continual_pretraining":
         raise RuntimeError("model artifact training method changed")
-    if training.get("seed") != 42 or training.get("optimizer_steps") != 192:
+    optimizer_steps = training.get("optimizer_steps")
+    if (
+        training.get("seed") != 42
+        or not isinstance(optimizer_steps, int)
+        or isinstance(optimizer_steps, bool)
+        or optimizer_steps < 1
+    ):
         raise RuntimeError("model artifact training budget changed")
+    profile = training.get("profile")
+    if profile is None:
+        if optimizer_steps != 192:
+            raise RuntimeError("legacy model artifact training budget changed")
+    elif profile == "real":
+        if optimizer_steps != 52_000:
+            raise RuntimeError("real model artifact training budget changed")
+        mixture = training.get("data_mixture")
+        if (
+            not isinstance(mixture, dict)
+            or set(mixture)
+            != {"policy", "without_replacement", "allocation_sha256"}
+            or mixture.get("policy") != "equal_share_without_replacement"
+            or mixture.get("without_replacement") is not True
+            or not isinstance(mixture.get("allocation_sha256"), str)
+            or not _SHA256_RE.fullmatch(mixture["allocation_sha256"])
+        ):
+            raise RuntimeError("real model artifact mixture policy changed")
+    else:
+        raise RuntimeError("model artifact training profile is invalid")
     if not isinstance(training.get("run_id"), str) or not _ID_RE.fullmatch(
         training["run_id"]
     ):
@@ -386,6 +412,18 @@ def _validate_training_provenance(training: Any) -> None:
             or not _SHA256_RE.fullmatch(item["dataset_manifest_sha256"])
         ):
             raise RuntimeError("model artifact dataset provenance is invalid")
+    if profile == "real":
+        if any(
+            not isinstance(item.get("train_sequences"), int)
+            or isinstance(item.get("train_sequences"), bool)
+            or item["train_sequences"] < 1
+            or item.get("eval_sequences") != 256
+            for item in datasets
+        ):
+            raise RuntimeError("real model artifact dataset allocation is invalid")
+        allocated = sum(item["train_sequences"] for item in datasets)
+        if allocated != optimizer_steps * execution["global_batch_sequences"]:
+            raise RuntimeError("real model artifact allocation total changed")
 
 
 def _validate_environment(environment: Any, training: Dict[str, Any]) -> None:

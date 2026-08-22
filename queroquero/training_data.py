@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import random
+from bisect import bisect_right
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Sequence, overload
 
 import pyarrow.parquet as pq
 
@@ -14,6 +15,7 @@ from .prepare import validate_preparation
 
 
 RESOLVED_INPUTS_SCHEMA = "queroquero-resolved-training-inputs/v1"
+REAL_RESOLVED_INPUTS_SCHEMA = "queroquero-resolved-training-inputs/v2"
 
 
 @dataclass(frozen=True)
@@ -32,15 +34,26 @@ class TrainingSequence:
 
 
 @dataclass(frozen=True)
+class TrainingSequenceReference:
+    dataset_id: str
+    row_index: int
+
+
+@dataclass(frozen=True)
 class ResolvedTrainingInputs:
     profile: str
     output_root: Path
     datasets: tuple[ResolvedDataset, ...]
     tokenizer: Dict[str, Any]
+    data_mixture: Dict[str, Any] | None = None
 
     def metadata(self) -> Dict[str, Any]:
-        return {
-            "schema_version": RESOLVED_INPUTS_SCHEMA,
+        value = {
+            "schema_version": (
+                REAL_RESOLVED_INPUTS_SCHEMA
+                if self.profile == "real"
+                else RESOLVED_INPUTS_SCHEMA
+            ),
             "profile": self.profile,
             "datasets": [
                 {
@@ -77,6 +90,17 @@ class ResolvedTrainingInputs:
                 )
             },
         }
+        if self.profile == "real":
+            value["data_mixture"] = self.data_mixture
+            value["allocated_train_sequences"] = {
+                dataset.dataset_id: dataset.manifest["counts"]["train_sequences"]
+                for dataset in self.datasets
+            }
+            value["allocated_train_tokens"] = sum(
+                dataset.manifest["counts"]["train_tokens"]
+                for dataset in self.datasets
+            )
+        return value
 
     def digest(self) -> str:
         return sha256_bytes(canonical_json_bytes(self.metadata()))
@@ -126,6 +150,18 @@ def resolve_training_inputs(
             )
         manifest_path = candidates[0]
         manifest = validate_preparation(manifest_path.parent)
+        if profile == "real":
+            prepared_profile = manifest.get("selection", {}).get("profile", {})
+            if (
+                prepared_profile.get("allocation_sha256")
+                != config["data_mixture"]["allocation_sha256"]
+                or prepared_profile.get("allocation_policy")
+                != config["data_mixture"]["policy"]
+                or prepared_profile.get("without_replacement") is not True
+            ):
+                raise RuntimeError(
+                    f"prepared real allocation changed for {dataset_id}"
+                )
         expected_counts = {
             "train_sequences": entry["train_sequences"],
             "eval_sequences": entry["eval_sequences"],
@@ -158,7 +194,81 @@ def resolve_training_inputs(
         output_root=root,
         datasets=tuple(resolved_datasets),
         tokenizer=common_tokenizer,
+        data_mixture=config.get("data_mixture"),
     )
+
+
+class LazyTrainingSequenceStore:
+    """Resolve lightweight row references while caching one shard per dataset."""
+
+    def __init__(self, inputs: ResolvedTrainingInputs) -> None:
+        self._datasets = {dataset.dataset_id: dataset for dataset in inputs.datasets}
+        self._shards: Dict[str, tuple[list[int], list[Path]]] = {}
+        self._cache: Dict[str, tuple[Path, Any]] = {}
+        for dataset in inputs.datasets:
+            ends = []
+            total = 0
+            for record in dataset.manifest["splits"]["train"]:
+                total += record["rows"]
+                ends.append((total, dataset.root / record["path"]))
+            expected = dataset.manifest["counts"]["train_sequences"]
+            if total != expected:
+                raise RuntimeError("training shard row counts changed")
+            self._shards[dataset.dataset_id] = (
+                [end for end, _ in ends],
+                [path for _, path in ends],
+            )
+
+    def load(self, reference: TrainingSequenceReference) -> TrainingSequence:
+        dataset = self._datasets.get(reference.dataset_id)
+        if dataset is None:
+            raise RuntimeError("training reference uses an unknown dataset")
+        ends, paths = self._shards[reference.dataset_id]
+        shard_index = bisect_right(ends, reference.row_index)
+        if shard_index >= len(paths) or reference.row_index < 0:
+            raise RuntimeError("training reference is outside the prepared split")
+        previous_end = ends[shard_index - 1] if shard_index else 0
+        shard_path = paths[shard_index]
+        cached = self._cache.get(reference.dataset_id)
+        if cached is None or cached[0] != shard_path:
+            table = pq.read_table(shard_path, columns=["input_ids"])
+            self._cache[reference.dataset_id] = (shard_path, table)
+        else:
+            table = cached[1]
+        values = table.column("input_ids")[reference.row_index - previous_end].as_py()
+        input_ids = tuple(int(value) for value in values)
+        if len(input_ids) != 1024:
+            raise RuntimeError("training input is not exactly 1024 tokens")
+        vocab_size = dataset.manifest["tokenizer"]["vocab_size"]
+        if any(value < 0 or value >= vocab_size for value in input_ids):
+            raise RuntimeError("training input contains a token outside the vocabulary")
+        return TrainingSequence(dataset_id=reference.dataset_id, input_ids=input_ids)
+
+
+class LazyTrainingSchedule(Sequence[TrainingSequence]):
+    def __init__(
+        self,
+        references: Sequence[TrainingSequenceReference],
+        store: LazyTrainingSequenceStore,
+    ) -> None:
+        self.references = tuple(references)
+        self.store = store
+
+    def __len__(self) -> int:
+        return len(self.references)
+
+    @overload
+    def __getitem__(self, index: int) -> TrainingSequence: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> list[TrainingSequence]: ...
+
+    def __getitem__(
+        self, index: int | slice
+    ) -> TrainingSequence | list[TrainingSequence]:
+        if isinstance(index, slice):
+            return [self.store.load(reference) for reference in self.references[index]]
+        return self.store.load(self.references[index])
 
 
 def load_split(dataset: ResolvedDataset, split: str) -> list[TrainingSequence]:
@@ -209,6 +319,71 @@ def load_training_sequences(
         random.Random(_stable_seed(seed, "round", row_index)).shuffle(round_ids)
         balanced.extend(by_dataset[dataset_id][row_index] for dataset_id in round_ids)
     return balanced
+
+
+def load_training_schedule(
+    inputs: ResolvedTrainingInputs, seed: int
+) -> Sequence[TrainingSequence]:
+    """Use the legacy eager schedule or a no-replacement lazy real schedule."""
+
+    if inputs.profile != "real":
+        return load_training_sequences(inputs, seed)
+    references = build_real_training_references(inputs, seed)
+    return LazyTrainingSchedule(references, LazyTrainingSequenceStore(inputs))
+
+
+def build_real_training_references(
+    inputs: ResolvedTrainingInputs, seed: int
+) -> tuple[TrainingSequenceReference, ...]:
+    if inputs.profile != "real":
+        raise RuntimeError("real references require real prepared inputs")
+    if not isinstance(inputs.data_mixture, dict) or inputs.data_mixture.get(
+        "policy"
+    ) != "equal_share_without_replacement":
+        raise RuntimeError("real training mixture policy changed")
+    counts = {
+        dataset.dataset_id: dataset.manifest["counts"]["train_sequences"]
+        for dataset in inputs.datasets
+    }
+    shuffled_rows: Dict[str, list[int]] = {}
+    for dataset_id, count in counts.items():
+        rows = list(range(count))
+        random.Random(_stable_seed(seed, dataset_id, "rows")).shuffle(rows)
+        shuffled_rows[dataset_id] = rows
+
+    total = sum(counts.values())
+    current = {dataset_id: 0 for dataset_id in counts}
+    consumed = {dataset_id: 0 for dataset_id in counts}
+    tie_order = sorted(
+        counts,
+        key=lambda dataset_id: _stable_seed(seed, "interleave", dataset_id),
+    )
+    tie_rank = {dataset_id: index for index, dataset_id in enumerate(tie_order)}
+    references = []
+    for _ in range(total):
+        active = [
+            dataset_id
+            for dataset_id in counts
+            if consumed[dataset_id] < counts[dataset_id]
+        ]
+        for dataset_id in active:
+            current[dataset_id] += counts[dataset_id]
+        selected = max(
+            active,
+            key=lambda dataset_id: (current[dataset_id], -tie_rank[dataset_id]),
+        )
+        current[selected] -= total
+        row_position = consumed[selected]
+        references.append(
+            TrainingSequenceReference(
+                dataset_id=selected,
+                row_index=shuffled_rows[selected][row_position],
+            )
+        )
+        consumed[selected] += 1
+    if len(set(references)) != total:
+        raise RuntimeError("real training schedule contains duplicate references")
+    return tuple(references)
 
 
 def load_evaluation_sequences(

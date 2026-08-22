@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import importlib
 import json
 import logging
@@ -31,10 +32,22 @@ from .manifest import (
 )
 from .packing import (
     clean_deduplicate_and_tokenize,
+    measure_unique_sequence_capacity,
     pack_for_budgets,
+    plan_incremental_packing,
     tokenizer_fingerprint,
 )
-from .storage import WorkStore, validate_shard, write_split
+from .real_plan import (
+    CAPACITY_REPORT_SCHEMA,
+    REAL_EVAL_SEQUENCES_PER_DATASET,
+    REAL_TARGET_TRAIN_SEQUENCES,
+    allocate_real_training,
+    capacity_report_id,
+    load_capacity_report,
+    validate_capacity_report,
+    write_real_allocation,
+)
+from .storage import WorkStore, validate_shard, write_split, write_split_incremental
 
 
 LOGGER = logging.getLogger("queroquero.prepare")
@@ -155,43 +168,76 @@ def run_preparation(dataset_id: str, profile: str, config_root: Path | None = No
     punctuation_spacing = resolved["dataset"]["filters"].get(
         "punctuation_spacing", "preserve"
     )
+    shard_size = resolved["preparation"]["storage"]["sequences_per_shard"]
     LOGGER.info("stage=tokenize status=started dataset=%s", dataset_id)
-    tokenized, tokenization_metrics = clean_deduplicate_and_tokenize(
-        scan.documents,
-        tokenizer,
-        dataset_id=dataset_id,
-        seed=resolved["preparation"]["seed"],
-        min_characters=min_characters,
-        punctuation_spacing=punctuation_spacing,
-    )
-    LOGGER.info(
-        "stage=tokenize status=complete dataset=%s documents=%d duplicates=%d",
-        dataset_id,
-        tokenization_metrics["documents_tokenized"],
-        tokenization_metrics["documents_exact_duplicates"],
-    )
-    LOGGER.info("stage=pack status=started dataset=%s", dataset_id)
-    packed = pack_for_budgets(
-        tokenized,
-        dataset_id=dataset_id,
-        seed=resolved["preparation"]["seed"],
-        sequence_length=resolved["preparation"]["sequence_length"],
-        train_sequences=resolved["profile"]["train_sequences"],
-        eval_sequences=resolved["profile"]["eval_sequences"],
-    )
+    if profile == "real":
+        incremental = plan_incremental_packing(
+            scan.documents,
+            tokenizer,
+            dataset_id=dataset_id,
+            seed=resolved["preparation"]["seed"],
+            sequence_length=resolved["preparation"]["sequence_length"],
+            train_sequences=resolved["profile"]["train_sequences"],
+            eval_sequences=resolved["profile"]["eval_sequences"],
+            min_characters=min_characters,
+            punctuation_spacing=punctuation_spacing,
+        )
+        tokenization_metrics = incremental.tokenization_metrics
+        LOGGER.info("stage=write status=started dataset=%s split=train", dataset_id)
+        train_shards = write_split_incremental(
+            output_dir, "train", incremental.train, shard_size
+        )
+        LOGGER.info("stage=write status=complete dataset=%s split=train", dataset_id)
+        LOGGER.info("stage=write status=started dataset=%s split=eval", dataset_id)
+        eval_shards = write_split_incremental(
+            output_dir, "eval", incremental.evaluation, shard_size
+        )
+        LOGGER.info("stage=write status=complete dataset=%s split=eval", dataset_id)
+        packing_metrics = {
+            **incremental.packing_metrics,
+            "train_discarded_tail_tokens": incremental.train.discarded_tail_tokens,
+            "eval_discarded_tail_tokens": incremental.evaluation.discarded_tail_tokens,
+            "train_tokens_not_selected_by_sequence_budget": (
+                incremental.train.tokens_not_selected_by_sequence_budget
+            ),
+            "eval_tokens_not_selected_by_sequence_budget": (
+                incremental.evaluation.tokens_not_selected_by_sequence_budget
+            ),
+        }
+        train_sequence_count = sum(record["rows"] for record in train_shards)
+        eval_sequence_count = sum(record["rows"] for record in eval_shards)
+    else:
+        tokenized, tokenization_metrics = clean_deduplicate_and_tokenize(
+            scan.documents,
+            tokenizer,
+            dataset_id=dataset_id,
+            seed=resolved["preparation"]["seed"],
+            min_characters=min_characters,
+            punctuation_spacing=punctuation_spacing,
+        )
+        packed = pack_for_budgets(
+            tokenized,
+            dataset_id=dataset_id,
+            seed=resolved["preparation"]["seed"],
+            sequence_length=resolved["preparation"]["sequence_length"],
+            train_sequences=resolved["profile"]["train_sequences"],
+            eval_sequences=resolved["profile"]["eval_sequences"],
+        )
+        LOGGER.info("stage=write status=started dataset=%s split=train", dataset_id)
+        train_shards = write_split(output_dir, "train", packed.train, shard_size)
+        LOGGER.info("stage=write status=complete dataset=%s split=train", dataset_id)
+        LOGGER.info("stage=write status=started dataset=%s split=eval", dataset_id)
+        eval_shards = write_split(output_dir, "eval", packed.evaluation, shard_size)
+        LOGGER.info("stage=write status=complete dataset=%s split=eval", dataset_id)
+        packing_metrics = packed.metrics
+        train_sequence_count = len(packed.train)
+        eval_sequence_count = len(packed.evaluation)
     LOGGER.info(
         "stage=pack status=complete dataset=%s train_sequences=%d eval_sequences=%d",
         dataset_id,
-        len(packed.train),
-        len(packed.evaluation),
+        train_sequence_count,
+        eval_sequence_count,
     )
-    shard_size = resolved["preparation"]["storage"]["sequences_per_shard"]
-    LOGGER.info("stage=write status=started dataset=%s split=train", dataset_id)
-    train_shards = write_split(output_dir, "train", packed.train, shard_size)
-    LOGGER.info("stage=write status=complete dataset=%s split=train", dataset_id)
-    LOGGER.info("stage=write status=started dataset=%s split=eval", dataset_id)
-    eval_shards = write_split(output_dir, "eval", packed.evaluation, shard_size)
-    LOGGER.info("stage=write status=complete dataset=%s split=eval", dataset_id)
 
     metrics: Dict[str, Any] = {
         "schema_version": METRICS_SCHEMA,
@@ -199,7 +245,7 @@ def run_preparation(dataset_id: str, profile: str, config_root: Path | None = No
         "profile": profile,
         "adapter": scan.metrics,
         "tokenization": tokenization_metrics,
-        "packing": packed.metrics,
+        "packing": packing_metrics,
     }
     metrics_path = output_dir / "preparation_metrics.json"
     write_json_atomic(metrics_path, metrics)
@@ -213,10 +259,10 @@ def run_preparation(dataset_id: str, profile: str, config_root: Path | None = No
         "exact_duplicates_removed": tokenization_metrics[
             "documents_exact_duplicates"
         ],
-        "train_sequences": len(packed.train),
-        "eval_sequences": len(packed.evaluation),
-        "train_tokens": len(packed.train) * 1024,
-        "eval_tokens": len(packed.evaluation) * 1024,
+        "train_sequences": train_sequence_count,
+        "eval_sequences": eval_sequence_count,
+        "train_tokens": train_sequence_count * 1024,
+        "eval_tokens": eval_sequence_count * 1024,
     }
     manifest = {
         "schema_version": DATASET_MANIFEST_SCHEMA,
@@ -250,14 +296,14 @@ def run_preparation(dataset_id: str, profile: str, config_root: Path | None = No
         "splits": {"train": train_shards, "eval": eval_shards},
         "counts": counts,
         "discarded_tail_tokens": {
-            "train": packed.metrics["train_discarded_tail_tokens"],
-            "eval": packed.metrics["eval_discarded_tail_tokens"],
+            "train": packing_metrics["train_discarded_tail_tokens"],
+            "eval": packing_metrics["eval_discarded_tail_tokens"],
         },
         "tokens_not_selected_by_sequence_budget": {
-            "train": packed.metrics[
+            "train": packing_metrics[
                 "train_tokens_not_selected_by_sequence_budget"
             ],
-            "eval": packed.metrics["eval_tokens_not_selected_by_sequence_budget"],
+            "eval": packing_metrics["eval_tokens_not_selected_by_sequence_budget"],
         },
         "metrics": _artifact_record(output_dir, metrics_path),
         "reports": report_records,
@@ -292,13 +338,174 @@ def run_preparation(dataset_id: str, profile: str, config_root: Path | None = No
                 "dataset_id": dataset_id,
                 "manifest": _project_relative(manifest_path),
                 "preparation_id": run_id,
-                "train_sequences": len(packed.train),
-                "eval_sequences": len(packed.evaluation),
+                "train_sequences": train_sequence_count,
+                "eval_sequences": eval_sequence_count,
             },
             sort_keys=True,
         )
     )
     return manifest_path
+
+
+def run_capacity_audit(
+    dataset_id: str,
+    *,
+    candidate_documents: int,
+    eval_sequences: int = REAL_EVAL_SEQUENCES_PER_DATASET,
+    config_root: Path | None = None,
+) -> Path:
+    if (
+        not isinstance(candidate_documents, int)
+        or isinstance(candidate_documents, bool)
+        or candidate_documents < 1
+    ):
+        raise RuntimeError("capacity candidate_documents must be positive")
+    if eval_sequences != REAL_EVAL_SEQUENCES_PER_DATASET:
+        raise RuntimeError("real capacity audit must reserve 256 evaluation sequences")
+
+    LOGGER.info("stage=capacity status=started dataset=%s", dataset_id)
+    base_resolved, _ = load_resolved_config(dataset_id, "mvp", config_root)
+    resolved = deepcopy(base_resolved)
+    resolved["profile"]["candidate_documents"] = candidate_documents
+    resolved["capacity_audit"] = {
+        "schema_version": CAPACITY_REPORT_SCHEMA,
+        "eval_sequences": eval_sequences,
+    }
+    if dataset_id == "gigaverbo":
+        resolved["profile"]["max_source_records"] = max(
+            resolved["profile"]["max_source_records"],
+            candidate_documents * 64,
+        )
+    audit_config_sha256 = sha256_bytes(canonical_json_bytes(resolved))
+    output_root = resolve_output_root(resolved["preparation"]["output_root"])
+    work_identity = deepcopy(resolved)
+    if dataset_id != "wackywacky":
+        work_identity["profile"].pop("candidate_documents", None)
+        work_identity["profile"].pop("max_source_records", None)
+    work = WorkStore(
+        output_root,
+        dataset_id,
+        sha256_bytes(canonical_json_bytes(work_identity)),
+    )
+    resume_cursor, resume_documents = work.load()
+    persisted_documents = len(resume_documents)
+
+    def save_checkpoint(cursor: Dict[str, Any], documents: list[Any]) -> None:
+        nonlocal persisted_documents
+        complete = bool(cursor.get("complete"))
+        if not complete and len(documents) - persisted_documents < 10_000:
+            return
+        work.checkpoint(cursor, documents)
+        persisted_documents = len(documents)
+        LOGGER.info(
+            "stage=capacity_scan status=checkpoint dataset=%s documents=%d%s",
+            dataset_id,
+            len(documents),
+            _cursor_progress(cursor),
+        )
+
+    adapter = load_adapter(resolved["dataset"]["adapter"])
+    scan = adapter.scan(
+        resolved,
+        resume_cursor=resume_cursor,
+        resume_documents=resume_documents,
+        checkpoint=save_checkpoint,
+    )
+    work.checkpoint(scan.resume_cursor or scan.cursor, scan.documents)
+    if scan.cursor.get("finalization_blocked"):
+        raise ReviewRequired(
+            f"{dataset_id} capacity audit requires the configured review decision"
+        )
+    tokenizer_config = resolved["preparation"]["tokenizer"]
+    tokenizer = _load_pinned_tokenizer(tokenizer_config)
+    _validate_loaded_tokenizer(tokenizer)
+    tokenizer_sha256 = tokenizer_fingerprint(tokenizer)
+    min_characters = int(resolved["dataset"]["filters"].get("min_characters", 1))
+    punctuation_spacing = resolved["dataset"]["filters"].get(
+        "punctuation_spacing", "preserve"
+    )
+    measured = measure_unique_sequence_capacity(
+        scan.documents,
+        tokenizer,
+        dataset_id=dataset_id,
+        seed=resolved["preparation"]["seed"],
+        sequence_length=resolved["preparation"]["sequence_length"],
+        eval_sequences=eval_sequences,
+        min_characters=min_characters,
+        punctuation_spacing=punctuation_spacing,
+    )
+    if measured["eval_sequences_available"] < eval_sequences:
+        raise RuntimeError(
+            f"{dataset_id} cannot reserve {eval_sequences} unique evaluation sequences"
+        )
+    reached_artificial_source_limit = (
+        dataset_id == "gigaverbo"
+        and scan.metrics.get("source_record_limit_reached") == 1
+    )
+    capacity_kind = (
+        "exact"
+        if len(scan.documents) < candidate_documents
+        and not reached_artificial_source_limit
+        else "lower_bound"
+    )
+    fingerprint_sha256 = sha256_bytes(canonical_json_bytes(scan.source_fingerprint))
+    report: Dict[str, Any] = {
+        "schema_version": CAPACITY_REPORT_SCHEMA,
+        "dataset_id": dataset_id,
+        "source_profile": "mvp",
+        "scan_config_sha256": audit_config_sha256,
+        "source_fingerprint": scan.source_fingerprint,
+        "source_fingerprint_sha256": fingerprint_sha256,
+        "tokenizer_fingerprint_sha256": tokenizer_sha256,
+        "candidate_documents": candidate_documents,
+        "documents_selected": len(scan.documents),
+        "documents_tokenized": measured["documents_tokenized"],
+        "documents_exact_duplicates": measured["documents_exact_duplicates"],
+        "eval_sequences_requested": eval_sequences,
+        "eval_sequences_available": measured["eval_sequences_available"],
+        "train_sequence_capacity": measured["train_sequence_capacity"],
+        "capacity_kind": capacity_kind,
+        "redistribution_status": "internal_research_only",
+    }
+    report["capacity_report_id"] = capacity_report_id(report)
+    validate_capacity_report(report)
+    report_dir = output_root / ".capacity" / dataset_id / report["capacity_report_id"]
+    report_path = report_dir / "capacity_report.json"
+    write_json_atomic(report_path, report)
+    LOGGER.info(
+        "stage=capacity status=complete dataset=%s train_sequence_capacity=%d "
+        "capacity_kind=%s",
+        dataset_id,
+        measured["train_sequence_capacity"],
+        capacity_kind,
+    )
+    print(
+        json.dumps(
+            {
+                "capacity_kind": capacity_kind,
+                "capacity_report": report_path.relative_to(output_root).as_posix(),
+                "capacity_report_id": report["capacity_report_id"],
+                "dataset_id": dataset_id,
+                "eval_sequences": eval_sequences,
+                "train_sequence_capacity": measured["train_sequence_capacity"],
+            },
+            sort_keys=True,
+        )
+    )
+    return report_path
+
+
+def run_real_allocation(
+    report_paths: list[Path], *, output: Path | None = None
+) -> Dict[str, Any]:
+    reports = [load_capacity_report(path) for path in report_paths]
+    allocation = allocate_real_training(
+        reports, target_train_sequences=REAL_TARGET_TRAIN_SEQUENCES
+    )
+    if output is not None:
+        write_real_allocation(output, allocation)
+    print(json.dumps(allocation, ensure_ascii=False, sort_keys=True))
+    return allocation
 
 
 def validate_preparation(path: str | Path) -> Dict[str, Any]:
@@ -319,7 +526,7 @@ def validate_preparation(path: str | Path) -> Dict[str, Any]:
     if manifest.get("dataset_id") not in DATASET_IDS:
         raise RuntimeError("manifest dataset_id is unknown")
     expected_budgets = {"smoke": (8, 2), "mvp": (256, 32)}
-    if manifest.get("profile") not in expected_budgets:
+    if manifest.get("profile") not in {*expected_budgets, "real"}:
         raise RuntimeError("manifest profile is unknown")
     if manifest.get("redistribution_status") != "internal_research_only":
         raise RuntimeError("manifest redistribution policy must remain internal")
@@ -430,7 +637,22 @@ def validate_preparation(path: str | Path) -> Dict[str, Any]:
             raise RuntimeError(f"manifest {split} token total is inconsistent")
 
     profile = manifest.get("selection", {}).get("profile", {})
-    expected_train, expected_eval = expected_budgets[manifest["profile"]]
+    if manifest["profile"] == "real":
+        expected_train = profile.get("train_sequences")
+        expected_eval = 256
+        if (
+            not isinstance(expected_train, int)
+            or isinstance(expected_train, bool)
+            or expected_train < 1
+            or profile.get("allocation_policy")
+            != "equal_share_without_replacement"
+            or profile.get("without_replacement") is not True
+            or not isinstance(profile.get("allocation_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", profile["allocation_sha256"])
+        ):
+            raise RuntimeError("real manifest allocation policy is invalid")
+    else:
+        expected_train, expected_eval = expected_budgets[manifest["profile"]]
     if (
         profile.get("train_sequences") != expected_train
         or profile.get("eval_sequences") != expected_eval
@@ -657,8 +879,22 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     run = subparsers.add_parser("run", help="prepare one configured dataset")
     run.add_argument("--dataset", choices=DATASET_IDS, required=True)
-    run.add_argument("--profile", choices=("smoke", "mvp"), required=True)
+    run.add_argument("--profile", choices=("smoke", "mvp", "real"), required=True)
     run.add_argument("--config-root", type=Path)
+    capacity = subparsers.add_parser(
+        "capacity", help="measure unique capacity from the full configured source"
+    )
+    capacity.add_argument("--dataset", choices=DATASET_IDS, required=True)
+    capacity.add_argument("--candidate-documents", type=int, required=True)
+    capacity.add_argument(
+        "--eval-sequences", type=int, default=REAL_EVAL_SEQUENCES_PER_DATASET
+    )
+    capacity.add_argument("--config-root", type=Path)
+    allocate = subparsers.add_parser(
+        "allocate-real", help="allocate the fixed real budget without replacement"
+    )
+    allocate.add_argument("--report", type=Path, action="append", required=True)
+    allocate.add_argument("--output", type=Path)
     validate = subparsers.add_parser("validate", help="validate prepared shards")
     validate.add_argument("--path", type=Path, required=True)
     return parser
@@ -674,6 +910,15 @@ def main() -> None:
     try:
         if args.command == "run":
             run_preparation(args.dataset, args.profile, args.config_root)
+        elif args.command == "capacity":
+            run_capacity_audit(
+                args.dataset,
+                candidate_documents=args.candidate_documents,
+                eval_sequences=args.eval_sequences,
+                config_root=args.config_root,
+            )
+        elif args.command == "allocate-real":
+            run_real_allocation(args.report, output=args.output)
         else:
             manifest = validate_preparation(args.path)
             print(

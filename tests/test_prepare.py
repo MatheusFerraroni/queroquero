@@ -12,7 +12,12 @@ import pyarrow.parquet as pq
 
 from queroquero.config import canonical_json_bytes, sha256_bytes
 from queroquero.datasets.base import Document, ScanResult
-from queroquero.prepare import ReviewRequired, run_preparation, validate_preparation
+from queroquero.prepare import (
+    ReviewRequired,
+    run_capacity_audit,
+    run_preparation,
+    validate_preparation,
+)
 
 
 class _Backend:
@@ -86,6 +91,41 @@ class BlockedAdapter:
             metrics={"documents_selected": 0},
             cursor={"complete": True, "finalization_blocked": True},
             extra_reports={"boilerplate_report": report},
+        )
+
+
+class CapacityAdapter:
+    def __init__(self, source_documents: int = 600):
+        self.source_documents = source_documents
+        self.resumed = False
+
+    def scan(self, config, resume_cursor=None, resume_documents=None, checkpoint=None):
+        self.resumed = self.resumed or resume_cursor is not None
+        limit = min(config["profile"]["candidate_documents"], self.source_documents)
+        documents = list(resume_documents or [])
+        for index in range(len(documents), limit):
+            documents.append(
+                Document(
+                    text=(
+                        f"PRIVATE_CAPACITY_TEXT_{index} "
+                        + (f"conteúdo único {index}. " * 55)
+                    ),
+                    source_ref=f"private-capacity:{index}",
+                    source_position={"index": index},
+                )
+            )
+        cursor = {"documents_selected": len(documents), "complete": True}
+        if checkpoint is not None:
+            checkpoint(cursor, documents)
+        return ScanResult(
+            documents=documents,
+            source_fingerprint={
+                "kind": "synthetic-capacity/v1",
+                "sha256": "c" * 64,
+                "records": self.source_documents,
+            },
+            metrics={"documents_selected": len(documents)},
+            cursor=cursor,
         )
 
 
@@ -197,6 +237,66 @@ def file_bytes(root: Path) -> dict[str, bytes]:
 
 
 class PreparationIntegrationTests(unittest.TestCase):
+    def test_capacity_audit_is_private_capped_exact_and_resumable(self) -> None:
+        resolved, _ = resolved_config(profile="mvp")
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            output_root = Path(temporary_dir)
+            capped_adapter = CapacityAdapter(source_documents=700)
+            with (
+                patch(
+                    "queroquero.prepare.load_resolved_config",
+                    return_value=(resolved, "d" * 64),
+                ),
+                patch(
+                    "queroquero.prepare.resolve_output_root",
+                    return_value=output_root,
+                ),
+                patch(
+                    "queroquero.prepare.load_adapter",
+                    return_value=capped_adapter,
+                ),
+                patch(
+                    "queroquero.prepare._load_pinned_tokenizer",
+                    return_value=FakeTokenizer(),
+                ),
+                redirect_stdout(io.StringIO()),
+            ):
+                first = run_capacity_audit("brwac", candidate_documents=600)
+                second = run_capacity_audit("brwac", candidate_documents=600)
+            self.assertEqual(first, second)
+            self.assertTrue(capped_adapter.resumed)
+            report = json.loads(first.read_text(encoding="utf-8"))
+            self.assertEqual(report["capacity_kind"], "lower_bound")
+            serialized = first.read_text(encoding="utf-8")
+            self.assertNotIn("PRIVATE_CAPACITY_TEXT", serialized)
+            self.assertNotIn("private-capacity:", serialized)
+
+            exact_adapter = CapacityAdapter(source_documents=600)
+            with (
+                patch(
+                    "queroquero.prepare.load_resolved_config",
+                    return_value=(resolved, "d" * 64),
+                ),
+                patch(
+                    "queroquero.prepare.resolve_output_root",
+                    return_value=output_root,
+                ),
+                patch(
+                    "queroquero.prepare.load_adapter",
+                    return_value=exact_adapter,
+                ),
+                patch(
+                    "queroquero.prepare._load_pinned_tokenizer",
+                    return_value=FakeTokenizer(),
+                ),
+                redirect_stdout(io.StringIO()),
+            ):
+                exact_path = run_capacity_audit(
+                    "brwac", candidate_documents=700
+                )
+            exact_report = json.loads(exact_path.read_text(encoding="utf-8"))
+            self.assertEqual(exact_report["capacity_kind"], "exact")
+
     def test_two_isolated_runs_are_byte_identical_private_and_fully_validated(self) -> None:
         resolved, digest = resolved_config()
         with tempfile.TemporaryDirectory() as temporary_dir:

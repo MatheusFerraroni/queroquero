@@ -54,14 +54,16 @@ class ConversationZipAdapter:
         candidate_limit = _positive_int(profile, "candidate_documents")
         seed = _seed(config)
         checkpoint_every = _positive_int(source, "checkpoint_every", default=1000)
-        selection_sha256 = stable_hash(
+        selection_identity = [
             "conversation-zip-selection/v1",
             self.dataset_id,
             profile_name,
             archive_relative,
             seed,
-            candidate_limit,
-        )
+        ]
+        if "capacity_audit" not in config:
+            selection_identity.append(candidate_limit)
+        selection_sha256 = stable_hash(*selection_identity)
 
         try:
             with ZipFile(archive_path) as archive:
@@ -268,14 +270,14 @@ def _dataset_config(config: Dict[str, Any], expected_id: str) -> Dict[str, Any]:
 
 def _profile_config(config: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
     profile_name = config.get("profile_name")
-    if profile_name not in {"smoke", "mvp"}:
-        raise ConfigError("profile_name must be smoke or mvp")
+    if profile_name not in {"smoke", "mvp", "real"}:
+        raise ConfigError("profile_name must be smoke, mvp, or real")
     return profile_name, _mapping(config, "profile")
 
 
 def _archive_for_profile(source: Dict[str, Any], profile_name: str) -> str:
     archives = _mapping(source, "archives_by_profile")
-    value = archives.get(profile_name)
+    value = archives.get("mvp" if profile_name == "real" else profile_name)
     if not isinstance(value, str) or not value:
         raise ConfigError(f"source archive missing for profile {profile_name!r}")
     return value
