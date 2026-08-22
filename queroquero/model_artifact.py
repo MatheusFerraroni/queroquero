@@ -186,7 +186,7 @@ def validate_model_artifact(
         raise RuntimeError("model artifact must contain full weights, not adapters")
     if not _has_safetensors_weights(listed):
         raise RuntimeError("model artifact does not contain safetensors weights")
-    required = {"config.json", "tokenizer_config.json", "special_tokens_map.json"}
+    required = {"config.json", "tokenizer_config.json", "tokenizer.json"}
     if not required <= listed:
         raise RuntimeError("model artifact is missing model or tokenizer configuration")
     if manifest.get("artifact_sha256") != _aggregate_files_sha256(records):

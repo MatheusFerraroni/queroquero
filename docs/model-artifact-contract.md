@@ -36,9 +36,9 @@ Mudanças de arquitetura ou tokenizer exigem nova versão do contrato.
 ├── config.json
 ├── model.safetensors
 │   ou shards + model.safetensors.index.json
-├── arquivos do tokenizer
-├── tokenizer_config.json
-├── special_tokens_map.json
+├── tokenizer.json
+├── tokenizer_config.json        # inclui os special tokens no Transformers 5
+├── special_tokens_map.json      # opcional, para layouts legados
 ├── generation_config.json        # quando gerado
 └── model_artifact_manifest.json
 ```

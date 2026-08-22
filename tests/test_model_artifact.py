@@ -15,12 +15,32 @@ from queroquero.model_artifact import (
 
 
 class ModelArtifactTests(unittest.TestCase):
-    def test_structural_validation_accepts_complete_internal_artifact(self) -> None:
+    def test_structural_validation_accepts_transformers_v5_layout(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = self._write_artifact(Path(temporary_dir))
             manifest = validate_model_artifact(root, load_model=False)
             self.assertEqual(manifest["schema_version"], MODEL_ARTIFACT_SCHEMA)
             self.assertEqual(manifest["architecture"]["parameter_count"], 670127616)
+            self.assertFalse((root / "special_tokens_map.json").exists())
+
+    def test_structural_validation_accepts_legacy_special_tokens_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = self._write_artifact(
+                Path(temporary_dir), include_special_tokens_map=True
+            )
+            manifest = validate_model_artifact(root, load_model=False)
+            listed = {record["path"] for record in manifest["files"]}
+            self.assertIn("special_tokens_map.json", listed)
+
+    def test_structural_validation_rejects_missing_tokenizer_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = self._write_artifact(
+                Path(temporary_dir), include_tokenizer_json=False
+            )
+            with self.assertRaisesRegex(
+                RuntimeError, "missing model or tokenizer configuration"
+            ):
+                validate_model_artifact(root, load_model=False)
 
     def test_structural_validation_rejects_changed_weights(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -43,7 +63,14 @@ class ModelArtifactTests(unittest.TestCase):
             self.assertEqual(manifest["training"]["execution"]["world_size"], 2)
             self.assertNotIn("bitsandbytes", manifest["environment"])
 
-    def _write_artifact(self, parent: Path, *, target: str = "p100") -> Path:
+    def _write_artifact(
+        self,
+        parent: Path,
+        *,
+        target: str = "p100",
+        include_special_tokens_map: bool = False,
+        include_tokenizer_json: bool = True,
+    ) -> Path:
         executions = {
             "p100": {
                 "strategy": "single_process",
@@ -94,10 +121,12 @@ class ModelArtifactTests(unittest.TestCase):
         files = {
             "config.json": b"{}",
             "model.safetensors": b"synthetic-safe-weights",
-            "tokenizer.json": b"{}",
             "tokenizer_config.json": b"{}",
-            "special_tokens_map.json": b"{}",
         }
+        if include_tokenizer_json:
+            files["tokenizer.json"] = b"{}"
+        if include_special_tokens_map:
+            files["special_tokens_map.json"] = b"{}"
         for name, content in files.items():
             (root / name).write_bytes(content)
         records = [
