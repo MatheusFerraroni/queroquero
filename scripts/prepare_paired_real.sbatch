@@ -47,6 +47,20 @@ case "${MODE}" in
       --dataset "${2:?dataset ausente}" \
       --candidate-documents "${3:?candidate_documents ausente}"
     ;;
+  capacity-array)
+    DATASETS=(
+      adrenaline
+      brwac
+      gigaverbo
+      multiwoz_ptbr
+      outerspace
+      wackywacky
+    )
+    DATASET_ID="${DATASETS[${SLURM_ARRAY_TASK_ID:?array task ausente}]}"
+    python -m queroquero.prepare capacity \
+      --dataset "${DATASET_ID}" \
+      --candidate-documents "${2:?candidate_documents ausente}"
+    ;;
   prepare)
     DATASETS=(
       adrenaline
@@ -70,7 +84,7 @@ case "${MODE}" in
       --output "${PTBR_OUTPUT_ROOT}/.capacity/paired-real-verification.json"
     ;;
   *)
-    echo "Uso: $0 {capacity <dataset> <candidate_documents>|prepare|verify}" >&2
+    echo "Uso: $0 {capacity <dataset> <candidate_documents>|capacity-array <candidate_documents>|prepare|verify}" >&2
     exit 2
     ;;
 esac

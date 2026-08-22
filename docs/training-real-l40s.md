@@ -14,20 +14,18 @@ observada dos braços pode variar.
 ## 1. Auditar capacidade via Slurm
 
 Atualize o checkout, ative o ambiente e confirme que `.env` aponta para as
-fontes. Submeta separadamente os seis scans, escolhendo um limite inicial de
-documentos apropriado para cada fonte:
+fontes. Submeta os seis scans como um array serial, escolhendo um limite inicial
+de documentos apropriado:
 
 ```bash
 cd "$HOME/projects/queroquero"
 source "$HOME/activate_queroquero.sh"
 git pull --ff-only
 
-./scripts/submit_paired_preparation.sh capacity adrenaline <documentos>
-./scripts/submit_paired_preparation.sh capacity brwac <documentos>
-./scripts/submit_paired_preparation.sh capacity gigaverbo <documentos>
-./scripts/submit_paired_preparation.sh capacity multiwoz_ptbr <documentos>
-./scripts/submit_paired_preparation.sh capacity outerspace <documentos>
-./scripts/submit_paired_preparation.sh capacity wackywacky <documentos>
+CAPACITY_JOB_ID=$(
+  ./scripts/submit_paired_preparation.sh capacity-all <documentos>
+)
+echo "$CAPACITY_JOB_ID"
 ```
 
 Os relatórios privados ficam em
@@ -35,6 +33,12 @@ Os relatórios privados ficam em
 `lower_bound` é suficiente somente quando já comprova a cota solicitada pelo
 alocador. Os jobs são retomáveis e não registram textos ou referências de
 origem.
+
+Se o alocador pedir expansão de apenas uma fonte, retome somente esse scan:
+
+```bash
+./scripts/submit_paired_preparation.sh capacity <dataset> <documentos-maior>
+```
 
 ## 2. Gerar a alocação pareada
 

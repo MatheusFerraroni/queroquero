@@ -18,6 +18,16 @@ SBATCH_ARGS=(
 )
 
 case "${MODE}" in
+  capacity-all)
+    CANDIDATE_DOCUMENTS="${1:-}"
+    if [[ ! "${CANDIDATE_DOCUMENTS}" =~ ^[1-9][0-9]*$ ]]; then
+      echo "Erro: candidate_documents deve ser um inteiro positivo." >&2
+      exit 2
+    fi
+    sbatch "${SBATCH_ARGS[@]}" --array=0-5%1 \
+      "${PROJECT_DIR}/scripts/prepare_paired_real.sbatch" \
+      capacity-array "${CANDIDATE_DOCUMENTS}"
+    ;;
   capacity)
     DATASET_ID="${1:-}"
     CANDIDATE_DOCUMENTS="${2:-}"
@@ -59,7 +69,7 @@ case "${MODE}" in
       "${PROJECT_DIR}/scripts/prepare_paired_real.sbatch" verify
     ;;
   *)
-    echo "Uso: $0 {capacity <dataset> <candidate_documents>|prepare-all|verify}" >&2
+    echo "Uso: $0 {capacity-all <candidate_documents>|capacity <dataset> <candidate_documents>|prepare-all|verify}" >&2
     exit 2
     ;;
 esac
