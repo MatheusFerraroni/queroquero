@@ -426,9 +426,12 @@ def _validate_config(
         "smoke": "engineering_prefix",
         "mvp": "representative",
         "real": "representative",
+        "paired_real": "representative",
     }.get(profile_name)
     if expected_selection is None:
-        raise ConfigError("WackyWacky profile_name must be smoke, mvp, or real")
+        raise ConfigError(
+            "WackyWacky profile_name must be smoke, mvp, real, or paired_real"
+        )
     if selection != expected_selection:
         raise ConfigError(
             f"WackyWacky {profile_name} selection must be {expected_selection}"
@@ -785,7 +788,9 @@ def _boilerplate_rules(
         raise ConfigError(
             "boilerplate mvp decision must be pending, keep, or remove_exact"
         )
-    decision_profile = "mvp" if profile_name == "real" else profile_name
+    decision_profile = (
+        "mvp" if profile_name in {"real", "paired_real"} else profile_name
+    )
     if decision_profile not in decisions:
         raise ConfigError("boilerplate profile must be smoke, mvp, or real")
 

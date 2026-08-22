@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import argparse
-from copy import deepcopy
+import hashlib
 import importlib
 import json
 import logging
 import re
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict
 
@@ -21,6 +22,7 @@ from .config import (
     resolve_output_root,
     scan_config_sha256,
     sha256_bytes,
+    validate_dataset_config,
 )
 from .manifest import (
     DATASET_MANIFEST_SCHEMA,
@@ -46,6 +48,13 @@ from .real_plan import (
     load_capacity_report,
     validate_capacity_report,
     write_real_allocation,
+)
+from .paired_plan import (
+    PAIRED_PREPARATION_PROFILE,
+    allocate_paired_real_training,
+    paired_mixture_for_arm,
+    validate_paired_real_allocation,
+    write_paired_real_allocation,
 )
 from .storage import WorkStore, validate_shard, write_split, write_split_incremental
 
@@ -170,7 +179,7 @@ def run_preparation(dataset_id: str, profile: str, config_root: Path | None = No
     )
     shard_size = resolved["preparation"]["storage"]["sequences_per_shard"]
     LOGGER.info("stage=tokenize status=started dataset=%s", dataset_id)
-    if profile == "real":
+    if profile in {"real", PAIRED_PREPARATION_PROFILE}:
         incremental = plan_incremental_packing(
             scan.documents,
             tokenizer,
@@ -508,6 +517,247 @@ def run_real_allocation(
     return allocation
 
 
+def run_paired_real_allocation(
+    report_paths: list[Path], *, output: Path | None = None
+) -> Dict[str, Any]:
+    reports = [load_capacity_report(path) for path in report_paths]
+    allocation = allocate_paired_real_training(reports)
+    if output is not None:
+        write_paired_real_allocation(output, allocation)
+    print(json.dumps(allocation, ensure_ascii=False, sort_keys=True))
+    return allocation
+
+
+def materialize_paired_real_configs(
+    allocation_path: Path,
+    *,
+    output_config_root: Path,
+    base_config_root: Path | None = None,
+) -> Dict[str, Any]:
+    from .training_config import (
+        PAIRED_REAL_TRAINING_CONFIG_SCHEMA,
+        validate_training_config,
+    )
+
+    allocation = _read_paired_allocation(allocation_path)
+    base_root = (base_config_root or (PROJECT_ROOT / "configs")).resolve()
+    output_root = output_config_root.expanduser()
+    if output_root.is_symlink():
+        raise RuntimeError("paired config output root must not be a symlink")
+    output_root = output_root.resolve()
+
+    capacity_by_dataset = {
+        record["dataset_id"]: record for record in allocation["capacity_reports"]
+    }
+    dataset_configs: Dict[str, Dict[str, Any]] = {}
+    for dataset_id in DATASET_IDS:
+        config = deepcopy(
+            _read_json_object(base_root / "datasets" / f"{dataset_id}.json")
+        )
+        profile = deepcopy(config["profiles"]["mvp"])
+        profile.update(
+            {
+                "train_sequences": allocation["prepared_train_sequences"][
+                    dataset_id
+                ],
+                "eval_sequences": 256,
+                "candidate_documents": capacity_by_dataset[dataset_id][
+                    "candidate_documents"
+                ],
+                "selection": "representative",
+                "allocation_policy": allocation["policy"],
+                "without_replacement": True,
+                "allocation_sha256": allocation["allocation_sha256"],
+                "pools": [
+                    {
+                        key: value
+                        for key, value in pool.items()
+                        if key != "dataset_id"
+                    }
+                    for pool in allocation["pools"]
+                    if pool["dataset_id"] == dataset_id
+                ],
+            }
+        )
+        if dataset_id == "gigaverbo":
+            profile["max_source_records"] = max(
+                profile["max_source_records"],
+                profile["candidate_documents"] * 64,
+            )
+        config["profiles"][PAIRED_PREPARATION_PROFILE] = profile
+        validate_dataset_config(config, dataset_id)
+        dataset_configs[dataset_id] = config
+
+    training_template = _read_json_object(
+        base_root / "training" / "l40s-mvp.json"
+    )
+    training_configs: Dict[str, Dict[str, Any]] = {}
+    for arm in ("general", "forum_tech"):
+        config = deepcopy(training_template)
+        config["schema_version"] = PAIRED_REAL_TRAINING_CONFIG_SCHEMA
+        config["profile"] = "real"
+        config["data_mixture"] = paired_mixture_for_arm(allocation, arm)
+        used = allocation[f"{arm}_allocations"]
+        for entry in config["datasets"]:
+            entry.pop("weight")
+            dataset_id = entry["dataset_id"]
+            entry.update(
+                {
+                    "prepared_train_sequences": allocation[
+                        "prepared_train_sequences"
+                    ][dataset_id],
+                    "train_sequences": used[dataset_id],
+                    "eval_sequences": 256,
+                }
+            )
+        config["training"].update(
+            {
+                "warmup_steps": 520,
+                "checkpoint_steps": [13_000, 26_000, 39_000],
+                "total_optimizer_steps": 52_000,
+            }
+        )
+        validate_training_config(config)
+        training_configs[arm] = config
+
+    written = []
+    for dataset_id, config in dataset_configs.items():
+        relative = Path("datasets") / f"{dataset_id}.json"
+        write_json_atomic(output_root / relative, config)
+        written.append(relative.as_posix())
+    for arm, config in training_configs.items():
+        relative = Path("training") / f"l40s-real-{arm.replace('_', '-')}.json"
+        write_json_atomic(output_root / relative, config)
+        written.append(relative.as_posix())
+    allocation_relative = Path("allocations") / "paired-real-allocation.json"
+    write_json_atomic(output_root / allocation_relative, allocation)
+    written.append(allocation_relative.as_posix())
+    return {
+        "status": "materialized",
+        "experiment_id": allocation["experiment_id"],
+        "allocation_sha256": allocation["allocation_sha256"],
+        "files": sorted(written),
+    }
+
+
+def run_materialize_paired_real_configs(
+    allocation_path: Path,
+    *,
+    output_config_root: Path,
+    base_config_root: Path | None = None,
+) -> Dict[str, Any]:
+    result = materialize_paired_real_configs(
+        allocation_path,
+        output_config_root=output_config_root,
+        base_config_root=base_config_root,
+    )
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return result
+
+
+def run_verify_paired_real(
+    general_config_path: Path,
+    forum_tech_config_path: Path,
+    *,
+    output_root: Path | None = None,
+    output: Path | None = None,
+) -> Dict[str, Any]:
+    from .paired_plan import (
+        DOMAIN_DATASET_IDS,
+        PAIRED_REAL_POLICY,
+        iter_paired_mixture_slots,
+    )
+    from .training_config import load_training_config
+    from .training_data import (
+        build_paired_training_references,
+        resolve_training_inputs,
+    )
+
+    general_config, _ = load_training_config(general_config_path)
+    forum_config, _ = load_training_config(forum_tech_config_path)
+    general_mixture = general_config.get("data_mixture", {})
+    forum_mixture = forum_config.get("data_mixture", {})
+    if (
+        general_mixture.get("policy") != PAIRED_REAL_POLICY
+        or forum_mixture.get("policy") != PAIRED_REAL_POLICY
+        or general_mixture.get("arm") != "general"
+        or forum_mixture.get("arm") != "forum_tech"
+    ):
+        raise RuntimeError("paired verification requires general and forum_tech configs")
+    for key in ("model", "training", "execution", "hardware"):
+        if general_config[key] != forum_config[key]:
+            raise RuntimeError(f"paired configs differ in {key}")
+    comparable_general = {
+        key: value for key, value in general_mixture.items() if key != "arm"
+    }
+    comparable_forum = {
+        key: value for key, value in forum_mixture.items() if key != "arm"
+    }
+    if comparable_general != comparable_forum:
+        raise RuntimeError("paired configs do not use the same allocation and pools")
+
+    general_inputs = resolve_training_inputs(general_config, output_root)
+    forum_inputs = resolve_training_inputs(forum_config, output_root)
+    if general_inputs.paired_inputs_sha256() != forum_inputs.paired_inputs_sha256():
+        raise RuntimeError("paired configs did not resolve the same prepared inputs")
+    for general_dataset, forum_dataset in zip(
+        general_inputs.datasets, forum_inputs.datasets
+    ):
+        if (
+            general_dataset.dataset_id != forum_dataset.dataset_id
+            or general_dataset.manifest_sha256 != forum_dataset.manifest_sha256
+            or general_dataset.manifest["splits"]["eval"]
+            != forum_dataset.manifest["splits"]["eval"]
+        ):
+            raise RuntimeError("paired evaluation manifests changed between arms")
+
+    general_references = build_paired_training_references(general_inputs, 42)
+    forum_references = build_paired_training_references(forum_inputs, 42)
+    slots = iter_paired_mixture_slots(general_mixture)
+    shared_positions = 0
+    replacement_positions = 0
+    for slot, general_reference, forum_reference in zip(
+        slots, general_references, forum_references
+    ):
+        if slot in {f"{dataset_id}_domain" for dataset_id in DOMAIN_DATASET_IDS}:
+            replacement_positions += 1
+            if (
+                general_reference.dataset_id != "brwac"
+                or forum_reference.dataset_id != slot.removesuffix("_domain")
+            ):
+                raise RuntimeError("paired domain substitution changed")
+        else:
+            shared_positions += 1
+            if general_reference != forum_reference:
+                raise RuntimeError("paired shared reference changed position")
+    if shared_positions + replacement_positions != 416_000:
+        raise RuntimeError("paired verification schedule length changed")
+
+    report = {
+        "schema_version": "queroquero-paired-real-verification/v1",
+        "status": "valid",
+        "experiment_id": general_mixture["experiment_id"],
+        "allocation_sha256": general_mixture["allocation_sha256"],
+        "schedule_template_sha256": general_mixture[
+            "schedule_template_sha256"
+        ],
+        "paired_inputs_sha256": general_inputs.paired_inputs_sha256(),
+        "train_sequences_per_arm": 416_000,
+        "train_tokens_per_arm": 416_000 * 1024,
+        "shared_positions": shared_positions,
+        "replacement_positions": replacement_positions,
+        "eval_sequences_per_dataset": 256,
+        "eval_datasets": len(DATASET_IDS),
+        "general_references_sha256": _references_sha256(general_references),
+        "forum_tech_references_sha256": _references_sha256(forum_references),
+    }
+    _assert_no_absolute_path_strings(report)
+    if output is not None:
+        write_json_atomic(output, report)
+    print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+    return report
+
+
 def validate_preparation(path: str | Path) -> Dict[str, Any]:
     requested_root = Path(path).expanduser()
     if requested_root.is_symlink():
@@ -526,7 +776,11 @@ def validate_preparation(path: str | Path) -> Dict[str, Any]:
     if manifest.get("dataset_id") not in DATASET_IDS:
         raise RuntimeError("manifest dataset_id is unknown")
     expected_budgets = {"smoke": (8, 2), "mvp": (256, 32)}
-    if manifest.get("profile") not in {*expected_budgets, "real"}:
+    if manifest.get("profile") not in {
+        *expected_budgets,
+        "real",
+        PAIRED_PREPARATION_PROFILE,
+    }:
         raise RuntimeError("manifest profile is unknown")
     if manifest.get("redistribution_status") != "internal_research_only":
         raise RuntimeError("manifest redistribution policy must remain internal")
@@ -637,20 +891,63 @@ def validate_preparation(path: str | Path) -> Dict[str, Any]:
             raise RuntimeError(f"manifest {split} token total is inconsistent")
 
     profile = manifest.get("selection", {}).get("profile", {})
-    if manifest["profile"] == "real":
+    if manifest["profile"] in {"real", PAIRED_PREPARATION_PROFILE}:
         expected_train = profile.get("train_sequences")
         expected_eval = 256
+        expected_policy = (
+            "matched_domain_substitution_without_replacement"
+            if manifest["profile"] == PAIRED_PREPARATION_PROFILE
+            else "equal_share_without_replacement"
+        )
         if (
             not isinstance(expected_train, int)
             or isinstance(expected_train, bool)
             or expected_train < 1
             or profile.get("allocation_policy")
-            != "equal_share_without_replacement"
+            != expected_policy
             or profile.get("without_replacement") is not True
             or not isinstance(profile.get("allocation_sha256"), str)
             or not re.fullmatch(r"[0-9a-f]{64}", profile["allocation_sha256"])
         ):
             raise RuntimeError("real manifest allocation policy is invalid")
+        if manifest["profile"] == PAIRED_PREPARATION_PROFILE:
+            pools = profile.get("pools")
+            if not isinstance(pools, list) or not pools:
+                raise RuntimeError("paired manifest pools are missing")
+            expected_pool_contracts = {
+                "brwac": [
+                    ("brwac_common", "shared"),
+                    ("brwac_extra", "replacement"),
+                ],
+                "gigaverbo": [("gigaverbo_shared", "shared")],
+                "multiwoz_ptbr": [
+                    ("multiwoz_ptbr_shared", "shared")
+                ],
+                "wackywacky": [("wackywacky_shared", "shared")],
+                "adrenaline": [("adrenaline_domain", "domain")],
+                "outerspace": [("outerspace_domain", "domain")],
+            }[manifest["dataset_id"]]
+            actual_pool_contracts = []
+            expected_start = 0
+            for pool in pools:
+                if (
+                    not isinstance(pool, dict)
+                    or set(pool)
+                    != {"pool_id", "role", "start_row", "train_sequences"}
+                    or not isinstance(pool.get("pool_id"), str)
+                    or not isinstance(pool.get("role"), str)
+                    or pool.get("start_row") != expected_start
+                    or not isinstance(pool.get("train_sequences"), int)
+                    or isinstance(pool.get("train_sequences"), bool)
+                    or pool["train_sequences"] < 1
+                ):
+                    raise RuntimeError("paired manifest pool ranges are invalid")
+                actual_pool_contracts.append((pool["pool_id"], pool["role"]))
+                expected_start += pool["train_sequences"]
+            if actual_pool_contracts != expected_pool_contracts:
+                raise RuntimeError("paired manifest pool contract changed")
+            if expected_start != expected_train:
+                raise RuntimeError("paired manifest pools do not fill the train split")
     else:
         expected_train, expected_eval = expected_budgets[manifest["profile"]]
     if (
@@ -776,6 +1073,27 @@ def _artifact_record(root: Path, path: Path) -> Dict[str, Any]:
     }
 
 
+def _read_json_object(path: Path) -> Dict[str, Any]:
+    if path.is_symlink():
+        raise RuntimeError("paired configuration input must not be a symlink")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"paired configuration input is missing: {path.name}") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"paired configuration input is invalid: {path.name}") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("paired configuration input must be an object")
+    return value
+
+
+def _read_paired_allocation(path: Path) -> Dict[str, Any]:
+    requested = path.expanduser()
+    if requested.is_symlink():
+        raise RuntimeError("paired allocation input must not be a symlink")
+    return validate_paired_real_allocation(_read_json_object(requested.resolve()))
+
+
 def _validate_artifact(
     root: Path, record: Any, expected_name: str | None = None
 ) -> Dict[str, Any]:
@@ -861,6 +1179,15 @@ def _resolved_regular_file(root: Path, relative: Path) -> Path:
     return resolved
 
 
+def _references_sha256(references: Any) -> str:
+    digest = hashlib.sha256()
+    for reference in references:
+        digest.update(reference.dataset_id.encode("ascii"))
+        digest.update(b"\0")
+        digest.update(int(reference.row_index).to_bytes(8, "big", signed=False))
+    return digest.hexdigest()
+
+
 def _assert_no_absolute_path_strings(value: Any) -> None:
     if isinstance(value, dict):
         for nested in value.values():
@@ -879,7 +1206,11 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     run = subparsers.add_parser("run", help="prepare one configured dataset")
     run.add_argument("--dataset", choices=DATASET_IDS, required=True)
-    run.add_argument("--profile", choices=("smoke", "mvp", "real"), required=True)
+    run.add_argument(
+        "--profile",
+        choices=("smoke", "mvp", "real", PAIRED_PREPARATION_PROFILE),
+        required=True,
+    )
     run.add_argument("--config-root", type=Path)
     capacity = subparsers.add_parser(
         "capacity", help="measure unique capacity from the full configured source"
@@ -895,6 +1226,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     allocate.add_argument("--report", type=Path, action="append", required=True)
     allocate.add_argument("--output", type=Path)
+    paired_allocate = subparsers.add_parser(
+        "allocate-paired-real",
+        help="allocate matched general and forum_tech budgets without replacement",
+    )
+    paired_allocate.add_argument(
+        "--report", type=Path, action="append", required=True
+    )
+    paired_allocate.add_argument("--output", type=Path)
+    paired_materialize = subparsers.add_parser(
+        "materialize-paired-real",
+        help="materialize paired dataset and training configs from an allocation",
+    )
+    paired_materialize.add_argument("--allocation", type=Path, required=True)
+    paired_materialize.add_argument(
+        "--output-config-root", type=Path, required=True
+    )
+    paired_materialize.add_argument("--base-config-root", type=Path)
+    paired_verify = subparsers.add_parser(
+        "verify-paired-real",
+        help="verify matched training schedules and shared evaluation manifests",
+    )
+    paired_verify.add_argument("--general-config", type=Path, required=True)
+    paired_verify.add_argument("--forum-tech-config", type=Path, required=True)
+    paired_verify.add_argument("--output-root", type=Path)
+    paired_verify.add_argument("--output", type=Path)
     validate = subparsers.add_parser("validate", help="validate prepared shards")
     validate.add_argument("--path", type=Path, required=True)
     return parser
@@ -919,6 +1275,21 @@ def main() -> None:
             )
         elif args.command == "allocate-real":
             run_real_allocation(args.report, output=args.output)
+        elif args.command == "allocate-paired-real":
+            run_paired_real_allocation(args.report, output=args.output)
+        elif args.command == "materialize-paired-real":
+            run_materialize_paired_real_configs(
+                args.allocation,
+                output_config_root=args.output_config_root,
+                base_config_root=args.base_config_root,
+            )
+        elif args.command == "verify-paired-real":
+            run_verify_paired_real(
+                args.general_config,
+                args.forum_tech_config,
+                output_root=args.output_root,
+                output=args.output,
+            )
         else:
             manifest = validate_preparation(args.path)
             print(

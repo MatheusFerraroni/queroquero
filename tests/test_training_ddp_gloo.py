@@ -16,6 +16,7 @@ def _gloo_worker(
     checkpoint_path,
     resume,
     stop_step,
+    arm,
 ):
     import torch
     import torch.distributed as dist
@@ -60,6 +61,11 @@ def _gloo_worker(
         for step in range(start_step + 1, 5):
             optimizer.zero_grad(set_to_none=True)
             global_values = list(range((step - 1) * 8, step * 8))
+            if arm == "general":
+                global_values = [
+                    value + 64 if value % 3 == 0 else value
+                    for value in global_values
+                ]
             local_values = global_values[rank * 4 : (rank + 1) * 4]
             for index, value in enumerate(local_values):
                 sync = ddp.no_sync() if index < 3 else _NullContext()
@@ -128,63 +134,74 @@ class GlooResumeIntegrationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)
-            continuous = root / "continuous.pt"
-            resumed = root / "resumed.pt"
-            checkpoint = root / "checkpoint.pt"
-            multiprocessing.spawn(
-                _gloo_worker,
-                args=(
-                    2,
-                    (root / "continuous-init").as_posix(),
-                    continuous.as_posix(),
-                    checkpoint.as_posix(),
-                    False,
-                    None,
-                ),
-                nprocs=2,
-                join=True,
-            )
-            multiprocessing.spawn(
-                _gloo_worker,
-                args=(
-                    2,
-                    (root / "stop-init").as_posix(),
-                    resumed.as_posix(),
-                    checkpoint.as_posix(),
-                    False,
-                    2,
-                ),
-                nprocs=2,
-                join=True,
-            )
-            checkpoint_state = torch.load(checkpoint, weights_only=False)
-            self.assertEqual(checkpoint_state["cursor"], 16)
-            self.assertEqual(len(checkpoint_state["rng_by_rank"]), 2)
-            multiprocessing.spawn(
-                _gloo_worker,
-                args=(
-                    2,
-                    (root / "resume-init").as_posix(),
-                    resumed.as_posix(),
-                    checkpoint.as_posix(),
-                    True,
-                    None,
-                ),
-                nprocs=2,
-                join=True,
-            )
+            for arm in ("general", "forum_tech"):
+                with self.subTest(arm=arm):
+                    continuous = root / f"{arm}-continuous.pt"
+                    resumed = root / f"{arm}-resumed.pt"
+                    checkpoint = root / f"{arm}-checkpoint.pt"
+                    multiprocessing.spawn(
+                        _gloo_worker,
+                        args=(
+                            2,
+                            (root / f"{arm}-continuous-init").as_posix(),
+                            continuous.as_posix(),
+                            checkpoint.as_posix(),
+                            False,
+                            None,
+                            arm,
+                        ),
+                        nprocs=2,
+                        join=True,
+                    )
+                    multiprocessing.spawn(
+                        _gloo_worker,
+                        args=(
+                            2,
+                            (root / f"{arm}-stop-init").as_posix(),
+                            resumed.as_posix(),
+                            checkpoint.as_posix(),
+                            False,
+                            2,
+                            arm,
+                        ),
+                        nprocs=2,
+                        join=True,
+                    )
+                    checkpoint_state = torch.load(checkpoint, weights_only=False)
+                    self.assertEqual(checkpoint_state["cursor"], 16)
+                    self.assertEqual(len(checkpoint_state["rng_by_rank"]), 2)
+                    multiprocessing.spawn(
+                        _gloo_worker,
+                        args=(
+                            2,
+                            (root / f"{arm}-resume-init").as_posix(),
+                            resumed.as_posix(),
+                            checkpoint.as_posix(),
+                            True,
+                            None,
+                            arm,
+                        ),
+                        nprocs=2,
+                        join=True,
+                    )
 
-            continuous_state = torch.load(continuous, weights_only=False)
-            resumed_state = torch.load(resumed, weights_only=False)
-            self.assertEqual(continuous_state["cursor"], resumed_state["cursor"])
-            self.assertEqual(
-                continuous_state["scheduler"], resumed_state["scheduler"]
-            )
-            for name, tensor in continuous_state["model"].items():
-                self.assertTrue(torch.equal(tensor, resumed_state["model"][name]))
-            self._assert_nested_equal(
-                continuous_state["optimizer"], resumed_state["optimizer"], torch
-            )
+                    continuous_state = torch.load(continuous, weights_only=False)
+                    resumed_state = torch.load(resumed, weights_only=False)
+                    self.assertEqual(
+                        continuous_state["cursor"], resumed_state["cursor"]
+                    )
+                    self.assertEqual(
+                        continuous_state["scheduler"], resumed_state["scheduler"]
+                    )
+                    for name, tensor in continuous_state["model"].items():
+                        self.assertTrue(
+                            torch.equal(tensor, resumed_state["model"][name])
+                        )
+                    self._assert_nested_equal(
+                        continuous_state["optimizer"],
+                        resumed_state["optimizer"],
+                        torch,
+                    )
 
     def _assert_nested_equal(self, left, right, torch) -> None:
         self.assertEqual(type(left), type(right))

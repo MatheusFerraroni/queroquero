@@ -11,6 +11,7 @@ from queroquero.config import (
     load_resolved_config,
     resolve_output_root,
     scan_config_sha256,
+    validate_profile,
 )
 
 
@@ -99,6 +100,37 @@ class ConfigTest(unittest.TestCase):
             (root / "datasets/brwac.json").write_bytes(source.read_bytes())
             with self.assertRaisesRegex(ConfigError, "exactly 1024"):
                 load_resolved_config("brwac", "smoke", root)
+
+    def test_paired_real_profile_requires_contiguous_pool_ranges(self) -> None:
+        profile = {
+            "train_sequences": 30,
+            "eval_sequences": 256,
+            "candidate_documents": 100,
+            "selection": "representative",
+            "allocation_policy": "matched_domain_substitution_without_replacement",
+            "without_replacement": True,
+            "allocation_sha256": "a" * 64,
+            "pools": [
+                {
+                    "pool_id": "brwac_common",
+                    "role": "shared",
+                    "start_row": 0,
+                    "train_sequences": 10,
+                },
+                {
+                    "pool_id": "brwac_extra",
+                    "role": "replacement",
+                    "start_row": 10,
+                    "train_sequences": 20,
+                },
+            ],
+        }
+        validate_profile(profile, "paired_real")
+
+        changed = deepcopy(profile)
+        changed["pools"][1]["start_row"] = 11
+        with self.assertRaisesRegex(ConfigError, "pool ranges"):
+            validate_profile(changed, "paired_real")
 
     def test_only_wacky_post_scan_decision_reuses_the_scan_cache(self) -> None:
         remove_exact, _ = load_resolved_config("wackywacky", "mvp")

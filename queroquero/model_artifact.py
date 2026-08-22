@@ -18,6 +18,7 @@ from .config import (
 )
 from .manifest import file_sha256, write_json_atomic
 from .packing import tokenizer_fingerprint
+from .paired_plan import PAIRED_REAL_POLICY, validate_paired_mixture
 
 
 MODEL_ARTIFACT_SCHEMA = "tucano2-model-artifact/v1"
@@ -344,7 +345,35 @@ def _validate_training_provenance(training: Any) -> None:
         if optimizer_steps != 52_000:
             raise RuntimeError("real model artifact training budget changed")
         mixture = training.get("data_mixture")
-        if (
+        if isinstance(mixture, dict) and mixture.get("policy") == PAIRED_REAL_POLICY:
+            try:
+                validate_paired_mixture(mixture)
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    "paired model artifact mixture policy changed"
+                ) from exc
+            experiment = training.get("experiment")
+            if (
+                not isinstance(experiment, dict)
+                or set(experiment)
+                != {
+                    "experiment_id",
+                    "arm",
+                    "allocation_sha256",
+                    "schedule_template_sha256",
+                    "paired_inputs_sha256",
+                }
+                or experiment.get("experiment_id") != mixture["experiment_id"]
+                or experiment.get("arm") != mixture["arm"]
+                or experiment.get("allocation_sha256")
+                != mixture["allocation_sha256"]
+                or experiment.get("schedule_template_sha256")
+                != mixture["schedule_template_sha256"]
+                or not isinstance(experiment.get("paired_inputs_sha256"), str)
+                or not _SHA256_RE.fullmatch(experiment["paired_inputs_sha256"])
+            ):
+                raise RuntimeError("paired model artifact experiment metadata changed")
+        elif (
             not isinstance(mixture, dict)
             or set(mixture)
             != {"policy", "without_replacement", "allocation_sha256"}
@@ -413,17 +442,50 @@ def _validate_training_provenance(training: Any) -> None:
         ):
             raise RuntimeError("model artifact dataset provenance is invalid")
     if profile == "real":
+        paired = training["data_mixture"].get("policy") == PAIRED_REAL_POLICY
         if any(
             not isinstance(item.get("train_sequences"), int)
             or isinstance(item.get("train_sequences"), bool)
-            or item["train_sequences"] < 1
+            or item["train_sequences"] < (0 if paired else 1)
             or item.get("eval_sequences") != 256
+            or (
+                paired
+                and (
+                    not isinstance(item.get("prepared_train_sequences"), int)
+                    or isinstance(item.get("prepared_train_sequences"), bool)
+                    or item["prepared_train_sequences"] < 1
+                    or item["train_sequences"]
+                    > item["prepared_train_sequences"]
+                )
+            )
             for item in datasets
         ):
             raise RuntimeError("real model artifact dataset allocation is invalid")
         allocated = sum(item["train_sequences"] for item in datasets)
         if allocated != optimizer_steps * execution["global_batch_sequences"]:
             raise RuntimeError("real model artifact allocation total changed")
+        if paired:
+            prepared_expected = {dataset_id: 0 for dataset_id in DATASET_IDS}
+            used_expected = {dataset_id: 0 for dataset_id in DATASET_IDS}
+            mixture = training["data_mixture"]
+            for pool in mixture["pools"]:
+                dataset_id = pool["dataset_id"]
+                count = pool["train_sequences"]
+                prepared_expected[dataset_id] += count
+                if mixture["arm"] == "forum_tech":
+                    if pool["role"] != "replacement":
+                        used_expected[dataset_id] += count
+                elif pool["role"] != "domain":
+                    used_expected[dataset_id] += count
+            actual_prepared = {
+                item["dataset_id"]: item["prepared_train_sequences"]
+                for item in datasets
+            }
+            actual_used = {
+                item["dataset_id"]: item["train_sequences"] for item in datasets
+            }
+            if actual_prepared != prepared_expected or actual_used != used_expected:
+                raise RuntimeError("paired model artifact dataset pools changed")
 
 
 def _validate_environment(environment: Any, training: Dict[str, Any]) -> None:

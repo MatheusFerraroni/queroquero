@@ -21,6 +21,7 @@ from typing import Any, Dict, Iterable
 from .config import MODEL_ID, MODEL_REVISION, PROJECT_ROOT, canonical_json_bytes, sha256_bytes
 from .manifest import file_sha256, write_json_atomic
 from .model_artifact import export_model_artifact, validate_model_artifact
+from .paired_plan import PAIRED_REAL_POLICY
 from .packing import tokenizer_fingerprint
 from .training_config import (
     TRAINING_METHOD,
@@ -120,6 +121,8 @@ def run_preflight(config_path: str | Path) -> Dict[str, Any] | None:
             "overflow_retries": step_metrics["overflow_retries"],
             "optimizer": config["training"]["optimizer"],
         }
+        if config.get("data_mixture", {}).get("policy") == PAIRED_REAL_POLICY:
+            result["experiment"] = _paired_experiment_metadata(config, inputs)
         if context.is_main:
             LOGGER.info(
                 "stage=preflight status=complete world_size=%d "
@@ -235,6 +238,10 @@ def run_training(
                 "artifact": None,
                 "metrics": None,
             }
+            if config.get("data_mixture", {}).get("policy") == PAIRED_REAL_POLICY:
+                run_manifest["experiment"] = _paired_experiment_metadata(
+                    config, inputs
+                )
 
             def create_run() -> bool:
                 if run_dir.exists() or checkpoint_root.exists():
@@ -536,12 +543,28 @@ def run_training(
                 for item, dataset in zip(
                     training_provenance["datasets"], inputs.datasets
                 ):
-                    item["train_sequences"] = dataset.manifest["counts"][
-                        "train_sequences"
-                    ]
+                    item["train_sequences"] = (
+                        dataset.train_sequences_used
+                        if dataset.train_sequences_used is not None
+                        else dataset.manifest["counts"]["train_sequences"]
+                    )
                     item["eval_sequences"] = dataset.manifest["counts"][
                         "eval_sequences"
                     ]
+                    if (
+                        config["data_mixture"].get("policy")
+                        == PAIRED_REAL_POLICY
+                    ):
+                        item["prepared_train_sequences"] = dataset.manifest[
+                            "counts"
+                        ]["train_sequences"]
+                if (
+                    config["data_mixture"].get("policy")
+                    == PAIRED_REAL_POLICY
+                ):
+                    training_provenance["experiment"] = (
+                        _paired_experiment_metadata(config, inputs)
+                    )
 
             def export_artifact() -> Dict[str, Any]:
                 LOGGER.info("stage=export status=started run_id=%s", run_id)
@@ -587,6 +610,11 @@ def run_training(
                 "quality_gate_passed": quality_gate,
                 "promotion_status": run_manifest["promotion_status"],
                 "artifact": artifact_metadata,
+                **(
+                    {"experiment": run_manifest["experiment"]}
+                    if "experiment" in run_manifest
+                    else {}
+                ),
             }
 
         result = _run_on_main(context, complete_run)
@@ -1425,6 +1453,19 @@ def _execution_metadata(config: Dict[str, Any]) -> Dict[str, Any]:
         ],
         "global_batch_sequences": training["global_batch_sequences"],
         "global_batch_tokens": training["global_batch_tokens"],
+    }
+
+
+def _paired_experiment_metadata(
+    config: Dict[str, Any], inputs: ResolvedTrainingInputs
+) -> Dict[str, Any]:
+    mixture = config["data_mixture"]
+    return {
+        "experiment_id": mixture["experiment_id"],
+        "arm": mixture["arm"],
+        "allocation_sha256": mixture["allocation_sha256"],
+        "schedule_template_sha256": mixture["schedule_template_sha256"],
+        "paired_inputs_sha256": inputs.paired_inputs_sha256(),
     }
 
 

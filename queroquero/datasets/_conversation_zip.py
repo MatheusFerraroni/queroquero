@@ -270,14 +270,15 @@ def _dataset_config(config: Dict[str, Any], expected_id: str) -> Dict[str, Any]:
 
 def _profile_config(config: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
     profile_name = config.get("profile_name")
-    if profile_name not in {"smoke", "mvp", "real"}:
-        raise ConfigError("profile_name must be smoke, mvp, or real")
+    if profile_name not in {"smoke", "mvp", "real", "paired_real"}:
+        raise ConfigError("profile_name must be smoke, mvp, real, or paired_real")
     return profile_name, _mapping(config, "profile")
 
 
 def _archive_for_profile(source: Dict[str, Any], profile_name: str) -> str:
     archives = _mapping(source, "archives_by_profile")
-    value = archives.get("mvp" if profile_name == "real" else profile_name)
+    source_profile = "mvp" if profile_name in {"real", "paired_real"} else profile_name
+    value = archives.get(source_profile)
     if not isinstance(value, str) or not value:
         raise ConfigError(f"source archive missing for profile {profile_name!r}")
     return value

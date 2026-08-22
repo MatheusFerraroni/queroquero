@@ -204,6 +204,7 @@ def _read_config(
         "smoke": "engineering_prefix",
         "mvp": "representative",
         "real": "representative",
+        "paired_real": "representative",
     }.get(profile_name)
     if expected_strategy is None or profile.get("selection") != expected_strategy:
         raise ValueError("GigaVerbo profile selection strategy is invalid")

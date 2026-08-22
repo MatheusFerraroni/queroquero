@@ -1,104 +1,164 @@
-# Treino real sem reposição em duas L40S
+# Experimento CPT pareado em duas L40S
 
-O perfil `real` usa uma única época, 416.000 sequências de 1.024 tokens e
-52.000 passos com batch global 8. Ele só pode ser materializado depois da
-auditoria das fontes completas: o repositório não presume que os seis corpora
-tenham a mesma capacidade.
+O experimento real produz dois modelos a partir do mesmo
+`Polygl0t/Tucano2-0.6B-Base` fixado. Cada braço consome 416.000 sequências de
+1.024 tokens, batch global 8 e 52.000 passos:
 
-## 1. Auditar capacidade
+- `general`: BrWaC comum, GigaVerbo, WackyWacky, MultiWOZ e BrWaC extra;
+- `forum_tech`: os mesmos quatro pools compartilhados, Adrenaline e OuterSpace.
 
-Na headnode, com as fontes e o cache do tokenizer disponíveis:
+Cada slot de Adrenaline ou OuterSpace é substituído no braço `general` por uma
+sequência exclusiva de BrWaC. O limite Slurm é sempre 24 horas; a duração
+observada dos braços pode variar.
+
+## 1. Auditar capacidade via Slurm
+
+Atualize o checkout, ative o ambiente e confirme que `.env` aponta para as
+fontes. Submeta separadamente os seis scans, escolhendo um limite inicial de
+documentos apropriado para cada fonte:
 
 ```bash
 cd "$HOME/projects/queroquero"
 source "$HOME/activate_queroquero.sh"
-export PTBR_OUTPUT_ROOT="$HOME/dataset/llm_datasets_derivated"
+git pull --ff-only
 
-python -m queroquero.prepare capacity \
-  --dataset adrenaline \
-  --candidate-documents <limite-de-documentos>
+./scripts/submit_paired_preparation.sh capacity adrenaline <documentos>
+./scripts/submit_paired_preparation.sh capacity brwac <documentos>
+./scripts/submit_paired_preparation.sh capacity gigaverbo <documentos>
+./scripts/submit_paired_preparation.sh capacity multiwoz_ptbr <documentos>
+./scripts/submit_paired_preparation.sh capacity outerspace <documentos>
+./scripts/submit_paired_preparation.sh capacity wackywacky <documentos>
 ```
 
-Repita para `brwac`, `gigaverbo`, `multiwoz_ptbr`, `outerspace` e
-`wackywacky`. O relatório fica em
-`$PTBR_OUTPUT_ROOT/.capacity/<dataset>/<id>/capacity_report.json`, não contém
-texto ou referência de fonte e permanece fora do Git.
+Os relatórios privados ficam em
+`$PTBR_OUTPUT_ROOT/.capacity/<dataset>/<id>/capacity_report.json`. Um relatório
+`lower_bound` é suficiente somente quando já comprova a cota solicitada pelo
+alocador. Os jobs são retomáveis e não registram textos ou referências de
+origem.
 
-Um relatório `lower_bound` prova apenas o que já foi medido. Se a alocação
-informar que a auditoria está incompleta, aumente `--candidate-documents`
-somente para os datasets indicados. Um relatório `exact` indica esgotamento da
-fonte selecionada.
+## 2. Gerar a alocação pareada
 
-## 2. Gerar a alocação canônica
-
-Passe explicitamente um relatório atual de cada dataset:
+Passe um relatório atual de cada dataset:
 
 ```bash
-python -m queroquero.prepare allocate-real \
+python -m queroquero.prepare allocate-paired-real \
   --report <adrenaline-capacity-report.json> \
   --report <brwac-capacity-report.json> \
   --report <gigaverbo-capacity-report.json> \
   --report <multiwoz-capacity-report.json> \
   --report <outerspace-capacity-report.json> \
   --report <wackywacky-capacity-report.json> \
-  --output "$PTBR_OUTPUT_ROOT/.capacity/real-allocation.json"
+  --output "$PTBR_OUTPUT_ROOT/.capacity/paired-real-allocation.json"
 ```
 
-O alocador começa pela divisão igual, esgota corpora pequenos e redistribui o
-déficit deterministicamente. A soma deve ser 416.000, sem oversampling. Se a
-capacidade exata agregada for insuficiente, o erro informa sequências e passos
-máximos seguros.
+O alocador cria primeiro o braço `forum_tech` por divisão igual, redistribuindo
+somente capacidade comprovadamente esgotada. Em seguida exige BrWaC suficiente
+para `brwac_common + adrenaline + outerspace`. Uma insuficiência interrompe o
+fluxo; nenhuma cota é alterada silenciosamente.
 
-Depois dessa saída ser revisada, os seis budgets, o `allocation_sha256` e o
-config `configs/training/l40s-real.json` devem ser versionados juntos. Até isso
-acontecer, os modos Slurm reais falham antes de submeter o job.
-
-## 3. Preparar e validar os manifests reais
-
-Após publicar os budgets exatos:
+Revise primeiro os budgets, ranges, `allocation_sha256` e
+`schedule_template_sha256`. Depois materialize deterministicamente os seis
+perfis e os dois configs:
 
 ```bash
-for dataset in adrenaline brwac gigaverbo multiwoz_ptbr outerspace wackywacky; do
-  python -m queroquero.prepare run --dataset "$dataset" --profile real
-done
+python -m queroquero.prepare materialize-paired-real \
+  --allocation "$PTBR_OUTPUT_ROOT/.capacity/paired-real-allocation.json" \
+  --output-config-root configs
+
+git diff -- configs
+python -m unittest tests.test_config tests.test_training_config \
+  tests.test_paired_plan -v
 ```
 
-A preparação real faz packing incremental e reaproveita shards completos e
-idênticos após uma retomada. Os manifests devem ter 256 sequências de avaliação
-por dataset e a soma dos splits de treino deve ser 416.000.
+O materializador valida tudo antes de escrever e registra a alocação canônica
+em `configs/allocations/paired-real-allocation.json`. Revise e versione juntos:
+
+- `profiles.paired_real` dos seis configs de dataset;
+- `configs/training/l40s-real-general.json`;
+- `configs/training/l40s-real-forum-tech.json`;
+- `configs/allocations/paired-real-allocation.json`.
+
+Os modos de treino permanecem bloqueados enquanto esses arquivos não existirem.
+
+## 3. Preparar e verificar os dados
+
+Depois de publicar os budgets exatos:
+
+```bash
+PREPARE_JOB_ID=$(./scripts/submit_paired_preparation.sh prepare-all)
+echo "$PREPARE_JOB_ID"
+```
+
+O array é serial para reduzir contenção nas fontes. Quando as seis tarefas
+terminarem, execute a verificação pareada:
+
+```bash
+VERIFY_JOB_ID=$(./scripts/submit_paired_preparation.sh verify)
+echo "$VERIFY_JOB_ID"
+```
+
+Aceite somente `COMPLETED 0:0` e um JSON com `"status": "valid"`, 416.000
+sequências por braço, igualdade dos slots compartilhados e substituição 1:1.
 
 ## 4. Preflight, treino e retomada
 
-`NCCL_P2P_DISABLE=1` continua sendo um workaround somente do ambiente do job:
+Execute os dois preflights antes de submeter qualquer treino completo:
 
 ```bash
-REAL_PREFLIGHT_JOB_ID=$(
-  env NCCL_P2P_DISABLE=1 ./scripts/submit_l40s.sh real-preflight
+GENERAL_PREFLIGHT_JOB_ID=$(
+  env NCCL_P2P_DISABLE=1 ./scripts/submit_l40s.sh real-general-preflight
 )
-
-REAL_JOB_ID=$(
-  env NCCL_P2P_DISABLE=1 ./scripts/submit_l40s.sh real
+FORUM_PREFLIGHT_JOB_ID=$(
+  env NCCL_P2P_DISABLE=1 ./scripts/submit_l40s.sh real-forum-tech-preflight
 )
 ```
 
-O job real recebe limite Slurm de 13 horas, checkpoints nos passos 13.000,
-26.000 e 39.000, além do checkpoint solicitado por `SIGUSR1`. Retome somente um
-run com checkpoint válido:
+Depois de ambos concluírem com loss finita:
 
 ```bash
-REAL_RESUME_JOB_ID=$(
-  env NCCL_P2P_DISABLE=1 ./scripts/submit_l40s.sh real-resume
+GENERAL_JOB_ID=$(
+  env NCCL_P2P_DISABLE=1 ./scripts/submit_l40s.sh real-general
+)
+FORUM_JOB_ID=$(
+  env NCCL_P2P_DISABLE=1 ./scripts/submit_l40s.sh real-forum-tech
 )
 ```
+
+Retome somente o mesmo braço e somente após um checkpoint validado:
+
+```bash
+env NCCL_P2P_DISABLE=1 ./scripts/submit_l40s.sh real-general-resume
+env NCCL_P2P_DISABLE=1 ./scripts/submit_l40s.sh real-forum-tech-resume
+```
+
+Os nomes antigos `real`, `real-preflight` e `real-resume` são rejeitados por
+serem ambíguos.
 
 ## Aceitação
 
-- `real-preflight`: duas L40S, BF16, loader lazy e loss finita;
-- treino: 52.000 passos, sem referência repetida, OOM ou NaN;
-- avaliações baseline/final finitas para os seis datasets;
-- checkpoints e run manifest atualizados;
-- artefato FP32 `tucano2-model-artifact/v1` exportado e validado offline;
-- `COMPLETED 0:0` no treino e na validação independente.
+- os dois configs possuem modelo, seed, treinamento, hardware e execução iguais;
+- cada braço conclui 52.000 passos e 425.984.000 tokens;
+- checkpoints existem nos passos 13.000, 26.000 e 39.000;
+- avaliações baseline/final usam os mesmos seis splits e são finitas;
+- os dois artefatos FP32 são exportados e validados offline;
+- cada job termina em `COMPLETED 0:0`;
+- `NCCL_P2P_DISABLE=1` permanece apenas no ambiente de cada job.
 
-O quality gate é registrado separadamente. Uma regressão bloqueia promoção
-científica, mas não remove o artefato técnico.
+Depois das validações independentes, gere o handoff para a futura classificação:
+
+```bash
+python -m queroquero.experiment_report \
+  --general-run-dir runs/<run-id-general> \
+  --forum-tech-run-dir runs/<run-id-forum-tech> \
+  --general-artifact artifacts/<artifact-id-general> \
+  --forum-tech-artifact artifacts/<artifact-id-forum-tech> \
+  --general-elapsed-seconds <ElapsedRaw-general> \
+  --forum-tech-elapsed-seconds <ElapsedRaw-forum-tech> \
+  --output runs/paired-experiment-report.json
+```
+
+Use `sacct -X -j <job-id> --noheader --format=ElapsedRaw` para obter cada valor.
+O relatório contém somente IDs, hashes, hiperparâmetros, tempos e métricas.
+
+A classificação downstream de B0, Geral e Fórum/Tec com cinco seeds não faz
+parte desta etapa.

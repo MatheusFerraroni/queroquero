@@ -12,6 +12,11 @@ from queroquero.model_artifact import (
     _tokenizer_files_fingerprint,
     validate_model_artifact,
 )
+from queroquero.paired_plan import (
+    allocate_paired_real_training,
+    paired_mixture_for_arm,
+)
+from tests.test_paired_plan import capacity_report
 
 
 class ModelArtifactTests(unittest.TestCase):
@@ -78,6 +83,29 @@ class ModelArtifactTests(unittest.TestCase):
                 416_000,
             )
 
+    def test_paired_artifacts_preserve_arm_and_common_experiment_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = self._write_artifact(
+                Path(temporary_dir),
+                target="l40s",
+                real=True,
+                paired_arm="general",
+            )
+            manifest = validate_model_artifact(root, load_model=False)
+            self.assertEqual(manifest["training"]["experiment"]["arm"], "general")
+            self.assertEqual(
+                manifest["training"]["experiment"]["experiment_id"],
+                manifest["training"]["data_mixture"]["experiment_id"],
+            )
+            by_dataset = {
+                item["dataset_id"]: item
+                for item in manifest["training"]["datasets"]
+            }
+            self.assertEqual(by_dataset["adrenaline"]["train_sequences"], 0)
+            self.assertGreater(
+                by_dataset["adrenaline"]["prepared_train_sequences"], 0
+            )
+
     def _write_artifact(
         self,
         parent: Path,
@@ -86,6 +114,7 @@ class ModelArtifactTests(unittest.TestCase):
         include_special_tokens_map: bool = False,
         include_tokenizer_json: bool = True,
         real: bool = False,
+        paired_arm: str | None = None,
     ) -> Path:
         executions = {
             "p100": {
@@ -142,6 +171,29 @@ class ModelArtifactTests(unittest.TestCase):
             budgets = [69_334, 69_334, 69_333, 69_333, 69_333, 69_333]
             for item, budget in zip(training["datasets"], budgets):
                 item["train_sequences"] = budget
+                item["eval_sequences"] = 256
+        if paired_arm is not None:
+            allocation = allocate_paired_real_training(
+                capacity_report(dataset_id, 300_000)
+                for dataset_id in DATASET_IDS
+            )
+            mixture = paired_mixture_for_arm(allocation, paired_arm)
+            training["data_mixture"] = mixture
+            training["experiment"] = {
+                "experiment_id": mixture["experiment_id"],
+                "arm": paired_arm,
+                "allocation_sha256": mixture["allocation_sha256"],
+                "schedule_template_sha256": mixture[
+                    "schedule_template_sha256"
+                ],
+                "paired_inputs_sha256": "9" * 64,
+            }
+            used = allocation[f"{paired_arm}_allocations"]
+            prepared = allocation["prepared_train_sequences"]
+            for item in training["datasets"]:
+                dataset_id = item["dataset_id"]
+                item["train_sequences"] = used[dataset_id]
+                item["prepared_train_sequences"] = prepared[dataset_id]
                 item["eval_sequences"] = 256
         artifact_id = _expected_artifact_id(training)
         root = parent / artifact_id

@@ -5,13 +5,20 @@ from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
+from queroquero.config import DATASET_IDS
+from queroquero.paired_plan import (
+    allocate_paired_real_training,
+    paired_mixture_for_arm,
+)
 from queroquero.training_config import (
+    PAIRED_REAL_TRAINING_CONFIG_SCHEMA,
     REAL_TRAINING_CONFIG_SCHEMA,
     TRAINING_CONFIG_SCHEMA,
     TrainingConfigError,
     load_training_config,
     validate_training_config,
 )
+from tests.test_paired_plan import capacity_report
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +42,36 @@ class TrainingConfigTests(unittest.TestCase):
         for entry, budget in zip(config["datasets"], budgets):
             entry.pop("weight")
             entry["train_sequences"] = budget
+            entry["eval_sequences"] = 256
+        config["training"].update(
+            {
+                "warmup_steps": 520,
+                "checkpoint_steps": [13_000, 26_000, 39_000],
+                "total_optimizer_steps": 52_000,
+            }
+        )
+        return config
+
+    def _paired_config(self, arm):
+        allocation = allocate_paired_real_training(
+            capacity_report(dataset_id, 300_000) for dataset_id in DATASET_IDS
+        )
+        config = json.loads(
+            (PROJECT_ROOT / "configs/training/l40s-mvp.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        config["schema_version"] = PAIRED_REAL_TRAINING_CONFIG_SCHEMA
+        config["profile"] = "real"
+        config["data_mixture"] = paired_mixture_for_arm(allocation, arm)
+        used = allocation[f"{arm}_allocations"]
+        for entry in config["datasets"]:
+            entry.pop("weight")
+            dataset_id = entry["dataset_id"]
+            entry["prepared_train_sequences"] = allocation[
+                "prepared_train_sequences"
+            ][dataset_id]
+            entry["train_sequences"] = used[dataset_id]
             entry["eval_sequences"] = 256
         config["training"].update(
             {
@@ -116,6 +153,34 @@ class TrainingConfigTests(unittest.TestCase):
         replacement["data_mixture"]["without_replacement"] = False
         with self.assertRaisesRegex(TrainingConfigError, "without replacement"):
             validate_training_config(replacement)
+
+    def test_paired_v4_contract_accepts_only_matched_arms(self) -> None:
+        general = self._paired_config("general")
+        forum = self._paired_config("forum_tech")
+        validate_training_config(general)
+        validate_training_config(forum)
+
+        self.assertEqual(general["training"], forum["training"])
+        self.assertEqual(general["model"], forum["model"])
+        self.assertEqual(general["execution"], forum["execution"])
+        self.assertEqual(
+            general["data_mixture"]["allocation_sha256"],
+            forum["data_mixture"]["allocation_sha256"],
+        )
+        self.assertEqual(
+            sum(entry["train_sequences"] for entry in general["datasets"]),
+            416_000,
+        )
+        general_by_dataset = {
+            entry["dataset_id"]: entry for entry in general["datasets"]
+        }
+        self.assertEqual(general_by_dataset["adrenaline"]["train_sequences"], 0)
+        self.assertEqual(general_by_dataset["outerspace"]["train_sequences"], 0)
+
+        changed = deepcopy(general)
+        changed["datasets"][0]["train_sequences"] = 1
+        with self.assertRaisesRegex(TrainingConfigError, "pools"):
+            validate_training_config(changed)
 
     def test_training_contract_rejects_non_p100_or_bf16(self) -> None:
         config = json.loads(

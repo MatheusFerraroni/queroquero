@@ -11,11 +11,17 @@ import pyarrow.parquet as pq
 
 from .config import canonical_json_bytes, load_resolved_config, resolve_output_root, sha256_bytes
 from .manifest import file_sha256
+from .paired_plan import (
+    PAIRED_REAL_POLICY,
+    iter_paired_mixture_slots,
+    validate_paired_mixture,
+)
 from .prepare import validate_preparation
 
 
 RESOLVED_INPUTS_SCHEMA = "queroquero-resolved-training-inputs/v1"
 REAL_RESOLVED_INPUTS_SCHEMA = "queroquero-resolved-training-inputs/v2"
+PAIRED_RESOLVED_INPUTS_SCHEMA = "queroquero-resolved-training-inputs/v3"
 
 
 @dataclass(frozen=True)
@@ -25,6 +31,7 @@ class ResolvedDataset:
     manifest: Dict[str, Any]
     manifest_sha256: str
     relative_manifest_path: str
+    train_sequences_used: int | None = None
 
 
 @dataclass(frozen=True)
@@ -46,14 +53,11 @@ class ResolvedTrainingInputs:
     datasets: tuple[ResolvedDataset, ...]
     tokenizer: Dict[str, Any]
     data_mixture: Dict[str, Any] | None = None
+    preparation_profile: str | None = None
 
     def metadata(self) -> Dict[str, Any]:
         value = {
-            "schema_version": (
-                REAL_RESOLVED_INPUTS_SCHEMA
-                if self.profile == "real"
-                else RESOLVED_INPUTS_SCHEMA
-            ),
+            "schema_version": self._metadata_schema(),
             "profile": self.profile,
             "datasets": [
                 {
@@ -93,23 +97,85 @@ class ResolvedTrainingInputs:
         if self.profile == "real":
             value["data_mixture"] = self.data_mixture
             value["allocated_train_sequences"] = {
-                dataset.dataset_id: dataset.manifest["counts"]["train_sequences"]
+                dataset.dataset_id: (
+                    dataset.train_sequences_used
+                    if dataset.train_sequences_used is not None
+                    else dataset.manifest["counts"]["train_sequences"]
+                )
                 for dataset in self.datasets
             }
             value["allocated_train_tokens"] = sum(
-                dataset.manifest["counts"]["train_tokens"]
-                for dataset in self.datasets
-            )
+                value["allocated_train_sequences"].values()
+            ) * 1024
+            if self._is_paired():
+                value["prepared_train_sequences"] = {
+                    dataset.dataset_id: dataset.manifest["counts"][
+                        "train_sequences"
+                    ]
+                    for dataset in self.datasets
+                }
+                value["prepared_train_tokens"] = sum(
+                    dataset.manifest["counts"]["train_tokens"]
+                    for dataset in self.datasets
+                )
+                value["preparation_profile"] = self.preparation_profile
+                value["paired_inputs_sha256"] = self.paired_inputs_sha256()
         return value
 
     def digest(self) -> str:
         return sha256_bytes(canonical_json_bytes(self.metadata()))
+
+    def paired_inputs_sha256(self) -> str:
+        if not self._is_paired():
+            raise RuntimeError("paired inputs digest requires a paired mixture")
+        mixture = validate_paired_mixture(self.data_mixture)
+        value = {
+            "schema_version": "queroquero-paired-resolved-inputs/v1",
+            "experiment_id": mixture["experiment_id"],
+            "allocation_sha256": mixture["allocation_sha256"],
+            "schedule_template_sha256": mixture["schedule_template_sha256"],
+            "preparation_profile": self.preparation_profile,
+            "datasets": [
+                {
+                    "dataset_id": dataset.dataset_id,
+                    "preparation_id": dataset.manifest["preparation_id"],
+                    "dataset_manifest_sha256": dataset.manifest_sha256,
+                    "prepared_train_sequences": dataset.manifest["counts"][
+                        "train_sequences"
+                    ],
+                    "eval_sequences": dataset.manifest["counts"]["eval_sequences"],
+                }
+                for dataset in self.datasets
+            ],
+        }
+        return sha256_bytes(canonical_json_bytes(value))
+
+    def _is_paired(self) -> bool:
+        return (
+            isinstance(self.data_mixture, dict)
+            and self.data_mixture.get("policy") == PAIRED_REAL_POLICY
+        )
+
+    def _metadata_schema(self) -> str:
+        if self._is_paired():
+            return PAIRED_RESOLVED_INPUTS_SCHEMA
+        if self.profile == "real":
+            return REAL_RESOLVED_INPUTS_SCHEMA
+        return RESOLVED_INPUTS_SCHEMA
 
 
 def resolve_training_inputs(
     config: Dict[str, Any], output_root: Path | None = None
 ) -> ResolvedTrainingInputs:
     profile = config["profile"]
+    mixture = config.get("data_mixture")
+    paired = (
+        isinstance(mixture, dict)
+        and mixture.get("policy") == PAIRED_REAL_POLICY
+    )
+    preparation_profile = (
+        mixture["preparation_profile"] if paired else profile
+    )
     requested_root = output_root or resolve_output_root("derived")
     if requested_root.is_symlink():
         raise RuntimeError("prepared dataset output root must not be a symlink")
@@ -121,7 +187,9 @@ def resolve_training_inputs(
     common_tokenizer: Dict[str, Any] | None = None
     for entry in config["datasets"]:
         dataset_id = entry["dataset_id"]
-        _, current_config_sha256 = load_resolved_config(dataset_id, profile)
+        _, current_config_sha256 = load_resolved_config(
+            dataset_id, preparation_profile
+        )
         dataset_root = root / dataset_id
         candidates = []
         if dataset_root.is_dir() and not dataset_root.is_symlink():
@@ -138,14 +206,15 @@ def resolve_training_inputs(
                     ) from exc
                 if (
                     candidate.get("dataset_id") == dataset_id
-                    and candidate.get("profile") == profile
+                    and candidate.get("profile") == preparation_profile
                     and candidate.get("resolved_config_sha256")
                     == current_config_sha256
                 ):
                     candidates.append(manifest_path)
         if len(candidates) != 1:
             raise RuntimeError(
-                f"expected exactly one current {profile} manifest for {dataset_id}; "
+                f"expected exactly one current {preparation_profile} manifest for "
+                f"{dataset_id}; "
                 f"found {len(candidates)}"
             )
         manifest_path = candidates[0]
@@ -162,10 +231,29 @@ def resolve_training_inputs(
                 raise RuntimeError(
                     f"prepared real allocation changed for {dataset_id}"
                 )
+            if paired:
+                expected_pools = [
+                    {
+                        key: value
+                        for key, value in pool.items()
+                        if key != "dataset_id"
+                    }
+                    for pool in mixture["pools"]
+                    if pool["dataset_id"] == dataset_id
+                ]
+                if prepared_profile.get("pools") != expected_pools:
+                    raise RuntimeError(
+                        f"prepared paired pools changed for {dataset_id}"
+                    )
+        expected_train_sequences = (
+            entry["prepared_train_sequences"]
+            if paired
+            else entry["train_sequences"]
+        )
         expected_counts = {
-            "train_sequences": entry["train_sequences"],
+            "train_sequences": expected_train_sequences,
             "eval_sequences": entry["eval_sequences"],
-            "train_tokens": entry["train_sequences"] * 1024,
+            "train_tokens": expected_train_sequences * 1024,
             "eval_tokens": entry["eval_sequences"] * 1024,
         }
         if any(
@@ -185,6 +273,7 @@ def resolve_training_inputs(
                 manifest=manifest,
                 manifest_sha256=file_sha256(manifest_path),
                 relative_manifest_path=manifest_path.relative_to(root).as_posix(),
+                train_sequences_used=entry["train_sequences"],
             )
         )
     if common_tokenizer is None:
@@ -194,7 +283,8 @@ def resolve_training_inputs(
         output_root=root,
         datasets=tuple(resolved_datasets),
         tokenizer=common_tokenizer,
-        data_mixture=config.get("data_mixture"),
+        data_mixture=mixture,
+        preparation_profile=preparation_profile,
     )
 
 
@@ -328,7 +418,13 @@ def load_training_schedule(
 
     if inputs.profile != "real":
         return load_training_sequences(inputs, seed)
-    references = build_real_training_references(inputs, seed)
+    if (
+        isinstance(inputs.data_mixture, dict)
+        and inputs.data_mixture.get("policy") == PAIRED_REAL_POLICY
+    ):
+        references = build_paired_training_references(inputs, seed)
+    else:
+        references = build_real_training_references(inputs, seed)
     return LazyTrainingSchedule(references, LazyTrainingSequenceStore(inputs))
 
 
@@ -383,6 +479,53 @@ def build_real_training_references(
         consumed[selected] += 1
     if len(set(references)) != total:
         raise RuntimeError("real training schedule contains duplicate references")
+    return tuple(references)
+
+
+def build_paired_training_references(
+    inputs: ResolvedTrainingInputs, seed: int
+) -> tuple[TrainingSequenceReference, ...]:
+    if inputs.profile != "real":
+        raise RuntimeError("paired references require real prepared inputs")
+    mixture = validate_paired_mixture(inputs.data_mixture)
+    pools = {pool["pool_id"]: pool for pool in mixture["pools"]}
+    shuffled_rows: Dict[str, list[int]] = {}
+    for pool_id, pool in pools.items():
+        start = pool["start_row"]
+        rows = list(range(start, start + pool["train_sequences"]))
+        random.Random(_stable_seed(seed, "paired_pool", pool_id)).shuffle(rows)
+        shuffled_rows[pool_id] = rows
+
+    consumed = {pool_id: 0 for pool_id in pools}
+    references = []
+    for slot_pool_id in iter_paired_mixture_slots(mixture):
+        actual_pool_id = slot_pool_id
+        if mixture["arm"] == "general" and pools[slot_pool_id]["role"] == "domain":
+            actual_pool_id = "brwac_extra"
+        pool = pools[actual_pool_id]
+        position = consumed[actual_pool_id]
+        if position >= len(shuffled_rows[actual_pool_id]):
+            raise RuntimeError("paired training pool was exhausted")
+        references.append(
+            TrainingSequenceReference(
+                dataset_id=pool["dataset_id"],
+                row_index=shuffled_rows[actual_pool_id][position],
+            )
+        )
+        consumed[actual_pool_id] += 1
+
+    if len(references) != 416_000:
+        raise RuntimeError("paired training schedule length changed")
+    if len(set(references)) != len(references):
+        raise RuntimeError("paired training schedule contains duplicate references")
+    for pool_id, pool in pools.items():
+        expected = pool["train_sequences"]
+        if mixture["arm"] == "general" and pool["role"] == "domain":
+            expected = 0
+        if mixture["arm"] == "forum_tech" and pool["role"] == "replacement":
+            expected = 0
+        if consumed[pool_id] != expected:
+            raise RuntimeError("paired training schedule did not consume its pools")
     return tuple(references)
 
 

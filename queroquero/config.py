@@ -77,7 +77,7 @@ def load_resolved_config(
             f"expected one of {sorted(profiles)}"
         )
     profile = profiles[profile_name]
-    validate_profile(profile, profile_name)
+    validate_profile(profile, profile_name, dataset_id)
     resolved = {
         "schema_version": RESOLVED_SCHEMA,
         "dataset_id": dataset_id,
@@ -159,18 +159,25 @@ def validate_dataset_config(config: Dict[str, Any], expected_id: str) -> None:
     _mapping(config, "source")
     _mapping(config, "filters")
     profiles = _mapping(config, "profiles")
-    if set(profiles) not in (
-        {"smoke", "mvp"},
-        {"smoke", "mvp", "real"},
-    ):
-        raise ConfigError("profiles must contain smoke/mvp and optionally real")
+    profile_names = set(profiles)
+    if not {"smoke", "mvp"}.issubset(profile_names) or not profile_names <= {
+        "smoke",
+        "mvp",
+        "real",
+        "paired_real",
+    }:
+        raise ConfigError(
+            "profiles must contain smoke/mvp and may contain real/paired_real"
+        )
     for profile_name, profile in profiles.items():
         if not isinstance(profile, dict):
             raise ConfigError(f"profile {profile_name!r} must be an object")
-        validate_profile(profile, profile_name)
+        validate_profile(profile, profile_name, expected_id)
 
 
-def validate_profile(profile: Dict[str, Any], name: str) -> None:
+def validate_profile(
+    profile: Dict[str, Any], name: str, dataset_id: str | None = None
+) -> None:
     _positive_int(profile, "train_sequences")
     _positive_int(profile, "eval_sequences")
     _positive_int(profile, "candidate_documents")
@@ -197,6 +204,65 @@ def validate_profile(profile: Dict[str, Any], name: str) -> None:
         digest = profile.get("allocation_sha256")
         if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise ConfigError("real profile allocation_sha256 must be a SHA-256")
+    if name == "paired_real":
+        if profile["eval_sequences"] != 256:
+            raise ConfigError("paired_real profile must use 256 evaluation sequences")
+        if selection != "representative":
+            raise ConfigError("paired_real profile must use representative selection")
+        if (
+            profile.get("allocation_policy")
+            != "matched_domain_substitution_without_replacement"
+            or profile.get("without_replacement") is not True
+        ):
+            raise ConfigError("paired_real profile must prohibit replacement")
+        digest = profile.get("allocation_sha256")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ConfigError(
+                "paired_real profile allocation_sha256 must be a SHA-256"
+            )
+        pools = profile.get("pools")
+        if not isinstance(pools, list) or not pools:
+            raise ConfigError("paired_real profile pools are missing")
+        expected_start = 0
+        total = 0
+        pool_ids = set()
+        for pool in pools:
+            if (
+                not isinstance(pool, dict)
+                or set(pool)
+                != {"pool_id", "role", "start_row", "train_sequences"}
+                or pool.get("role") not in {"shared", "domain", "replacement"}
+                or not isinstance(pool.get("pool_id"), str)
+                or not re.fullmatch(r"[a-z][a-z0-9_]*", pool["pool_id"])
+                or pool["pool_id"] in pool_ids
+                or pool.get("start_row") != expected_start
+            ):
+                raise ConfigError("paired_real profile pool ranges are invalid")
+            _positive_int(pool, "train_sequences")
+            pool_ids.add(pool["pool_id"])
+            expected_start += pool["train_sequences"]
+            total += pool["train_sequences"]
+        if total != profile["train_sequences"]:
+            raise ConfigError("paired_real profile pools do not fill its train budget")
+        if dataset_id is not None:
+            expected_contracts = {
+                "brwac": [
+                    ("brwac_common", "shared"),
+                    ("brwac_extra", "replacement"),
+                ],
+                "gigaverbo": [("gigaverbo_shared", "shared")],
+                "multiwoz_ptbr": [
+                    ("multiwoz_ptbr_shared", "shared")
+                ],
+                "wackywacky": [("wackywacky_shared", "shared")],
+                "adrenaline": [("adrenaline_domain", "domain")],
+                "outerspace": [("outerspace_domain", "domain")],
+            }[dataset_id]
+            actual_contracts = [
+                (pool["pool_id"], pool["role"]) for pool in pools
+            ]
+            if actual_contracts != expected_contracts:
+                raise ConfigError("paired_real profile pool contract changed")
 
 
 def resolve_project_path(value: str) -> Path:

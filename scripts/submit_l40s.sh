@@ -7,9 +7,13 @@ PROJECT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 MODE="${1:-}"
 
 case "${MODE}" in
-  preflight|smoke-stop|smoke-resume|mvp|mvp-resume|real-preflight|real|real-resume|validate) ;;
+  preflight|smoke-stop|smoke-resume|mvp|mvp-resume|real-general-preflight|real-general|real-general-resume|real-forum-tech-preflight|real-forum-tech|real-forum-tech-resume|validate) ;;
+  real|real-preflight|real-resume)
+    echo "Erro: modo real ambíguo; escolha explicitamente real-general ou real-forum-tech." >&2
+    exit 2
+    ;;
   *)
-    echo "Uso: $0 {preflight|smoke-stop|smoke-resume|mvp|mvp-resume|real-preflight|real|real-resume|validate}" >&2
+    echo "Uso: $0 {preflight|smoke-stop|smoke-resume|mvp|mvp-resume|real-general-preflight|real-general|real-general-resume|real-forum-tech-preflight|real-forum-tech|real-forum-tech-resume|validate}" >&2
     exit 2
     ;;
 esac
@@ -18,11 +22,16 @@ mkdir -p "${PROJECT_DIR}/logs"
 cd "${PROJECT_DIR}"
 
 SBATCH_TIME="1-00:00:00"
-if [[ "${MODE}" == real* ]]; then
-  SBATCH_TIME="13:00:00"
-  REAL_CONFIG_PATH="${REAL_TRAINING_CONFIG:-configs/training/l40s-real.json}"
+if [[ "${MODE}" == real-general* ]]; then
+  REAL_CONFIG_PATH="configs/training/l40s-real-general.json"
   if [[ ! -f "${REAL_CONFIG_PATH}" ]]; then
-    echo "Erro: config real ausente; execute capacity/allocate-real e versione os budgets primeiro." >&2
+    echo "Erro: config Geral ausente; execute a auditoria e versione a alocação pareada primeiro." >&2
+    exit 2
+  fi
+elif [[ "${MODE}" == real-forum-tech* ]]; then
+  REAL_CONFIG_PATH="configs/training/l40s-real-forum-tech.json"
+  if [[ ! -f "${REAL_CONFIG_PATH}" ]]; then
+    echo "Erro: config Fórum/Tec ausente; execute a auditoria e versione a alocação pareada primeiro." >&2
     exit 2
   fi
 fi

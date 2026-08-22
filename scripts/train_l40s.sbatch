@@ -96,17 +96,23 @@ case "${MODE}" in
   mvp-resume)
     run_ddp run --config configs/training/l40s-mvp.json --resume
     ;;
-  real-preflight)
-    run_ddp preflight --config \
-      "${REAL_TRAINING_CONFIG:-configs/training/l40s-real.json}"
+  real-general-preflight)
+    run_ddp preflight --config configs/training/l40s-real-general.json
     ;;
-  real)
-    run_ddp run --config \
-      "${REAL_TRAINING_CONFIG:-configs/training/l40s-real.json}"
+  real-general)
+    run_ddp run --config configs/training/l40s-real-general.json
     ;;
-  real-resume)
-    run_ddp run --config \
-      "${REAL_TRAINING_CONFIG:-configs/training/l40s-real.json}" --resume
+  real-general-resume)
+    run_ddp run --config configs/training/l40s-real-general.json --resume
+    ;;
+  real-forum-tech-preflight)
+    run_ddp preflight --config configs/training/l40s-real-forum-tech.json
+    ;;
+  real-forum-tech)
+    run_ddp run --config configs/training/l40s-real-forum-tech.json
+    ;;
+  real-forum-tech-resume)
+    run_ddp run --config configs/training/l40s-real-forum-tech.json --resume
     ;;
   validate)
     if [[ -z "${MODEL_ARTIFACT_PATH:-}" ]]; then
@@ -117,7 +123,7 @@ case "${MODE}" in
       --artifact "${MODEL_ARTIFACT_PATH}"
     ;;
   *)
-    echo "Uso: $0 {preflight|smoke-stop|smoke-resume|mvp|mvp-resume|real-preflight|real|real-resume|validate}" >&2
+    echo "Uso: $0 {preflight|smoke-stop|smoke-resume|mvp|mvp-resume|real-general-preflight|real-general|real-general-resume|real-forum-tech-preflight|real-forum-tech|real-forum-tech-resume|validate}" >&2
     exit 2
     ;;
 esac

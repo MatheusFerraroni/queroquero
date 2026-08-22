@@ -13,10 +13,12 @@ from .config import (
     resolve_project_path,
     sha256_bytes,
 )
+from .paired_plan import validate_paired_mixture
 
 
 TRAINING_CONFIG_SCHEMA = "queroquero-training-config/v2"
 REAL_TRAINING_CONFIG_SCHEMA = "queroquero-training-config/v3"
+PAIRED_REAL_TRAINING_CONFIG_SCHEMA = "queroquero-training-config/v4"
 TRAINING_METHOD = "full_parameter_continual_pretraining"
 TRAINING_DATASET_IDS = tuple(sorted(DATASET_IDS))
 REAL_TRAINING_SEQUENCES = 416_000
@@ -56,11 +58,14 @@ def load_training_config(path: str | Path) -> tuple[Dict[str, Any], str]:
 def validate_training_config(config: Dict[str, Any]) -> None:
     schema = config.get("schema_version")
     legacy = schema == TRAINING_CONFIG_SCHEMA
-    real = schema == REAL_TRAINING_CONFIG_SCHEMA
+    single_real = schema == REAL_TRAINING_CONFIG_SCHEMA
+    paired_real = schema == PAIRED_REAL_TRAINING_CONFIG_SCHEMA
+    real = single_real or paired_real
     if not legacy and not real:
         raise TrainingConfigError(
             "training schema must be "
-            f"{TRAINING_CONFIG_SCHEMA!r} or {REAL_TRAINING_CONFIG_SCHEMA!r}"
+            f"{TRAINING_CONFIG_SCHEMA!r}, {REAL_TRAINING_CONFIG_SCHEMA!r}, or "
+            f"{PAIRED_REAL_TRAINING_CONFIG_SCHEMA!r}"
         )
     expected_top_level = {
         "schema_version",
@@ -80,7 +85,7 @@ def validate_training_config(config: Dict[str, Any]) -> None:
     if legacy and profile not in {"smoke", "mvp"}:
         raise TrainingConfigError("v2 training profile must be smoke or mvp")
     if real and profile != "real":
-        raise TrainingConfigError("v3 training profile must be real")
+        raise TrainingConfigError("v3/v4 training profile must be real")
 
     model = _mapping(config, "model")
     expected_model = {
@@ -110,6 +115,8 @@ def validate_training_config(config: Dict[str, Any]) -> None:
         }
         if legacy:
             expected_entry_keys.add("weight")
+        if paired_real:
+            expected_entry_keys.add("prepared_train_sequences")
         if set(entry) != expected_entry_keys:
             raise TrainingConfigError("dataset entry keys are incomplete or unknown")
         dataset_id = entry.get("dataset_id")
@@ -130,7 +137,7 @@ def validate_training_config(config: Dict[str, Any]) -> None:
                 raise TrainingConfigError(
                     f"dataset budgets do not match the {profile} preparation profile"
                 )
-        else:
+        elif single_real:
             _positive_int(entry, "train_sequences")
             if not _matches_exact(
                 entry.get("eval_sequences"), REAL_EVAL_SEQUENCES_PER_DATASET
@@ -138,10 +145,23 @@ def validate_training_config(config: Dict[str, Any]) -> None:
                 raise TrainingConfigError(
                     "real evaluation budget must be 256 sequences per dataset"
                 )
+        else:
+            _nonnegative_int(entry, "train_sequences")
+            _positive_int(entry, "prepared_train_sequences")
+            if entry["train_sequences"] > entry["prepared_train_sequences"]:
+                raise TrainingConfigError(
+                    "paired train budget exceeds its prepared dataset"
+                )
+            if not _matches_exact(
+                entry.get("eval_sequences"), REAL_EVAL_SEQUENCES_PER_DATASET
+            ):
+                raise TrainingConfigError(
+                    "paired evaluation budget must be 256 sequences per dataset"
+                )
         train_total += entry["train_sequences"]
     if seen != set(TRAINING_DATASET_IDS):
         raise TrainingConfigError("training configuration omits a dataset")
-    if real:
+    if single_real:
         mixture = _mapping(config, "data_mixture")
         if set(mixture) != {
             "policy",
@@ -163,6 +183,42 @@ def validate_training_config(config: Dict[str, Any]) -> None:
         if train_total != REAL_TRAINING_SEQUENCES:
             raise TrainingConfigError(
                 f"real training allocation must total {REAL_TRAINING_SEQUENCES}"
+            )
+    elif paired_real:
+        mixture = _mapping(config, "data_mixture")
+        try:
+            validate_paired_mixture(mixture)
+        except RuntimeError as exc:
+            raise TrainingConfigError(str(exc)) from exc
+        prepared_expected = {dataset_id: 0 for dataset_id in DATASET_IDS}
+        used_expected = {dataset_id: 0 for dataset_id in DATASET_IDS}
+        for pool in mixture["pools"]:
+            dataset_id = pool["dataset_id"]
+            count = pool["train_sequences"]
+            prepared_expected[dataset_id] += count
+            if mixture["arm"] == "forum_tech":
+                if pool["role"] != "replacement":
+                    used_expected[dataset_id] += count
+            elif pool["role"] != "domain":
+                used_expected[dataset_id] += count
+        configured_prepared = {
+            entry["dataset_id"]: entry["prepared_train_sequences"]
+            for entry in datasets
+        }
+        configured_used = {
+            entry["dataset_id"]: entry["train_sequences"] for entry in datasets
+        }
+        if configured_prepared != prepared_expected:
+            raise TrainingConfigError(
+                "paired prepared dataset budgets do not match the pools"
+            )
+        if configured_used != used_expected:
+            raise TrainingConfigError(
+                "paired arm dataset budgets do not match the pools"
+            )
+        if train_total != REAL_TRAINING_SEQUENCES:
+            raise TrainingConfigError(
+                f"paired training allocation must total {REAL_TRAINING_SEQUENCES}"
             )
 
     execution = _mapping(config, "execution")
@@ -345,6 +401,12 @@ def _positive_int(config: Dict[str, Any], key: str) -> None:
     value = config.get(key)
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         raise TrainingConfigError(f"{key} must be a positive integer")
+
+
+def _nonnegative_int(config: Dict[str, Any], key: str) -> None:
+    value = config.get(key)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise TrainingConfigError(f"{key} must be a non-negative integer")
 
 
 def _is_sha256(value: str) -> bool:
