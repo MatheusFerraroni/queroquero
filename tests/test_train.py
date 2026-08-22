@@ -254,8 +254,11 @@ class TrainCoreTests(unittest.TestCase):
                 self.loaded = value
 
         class FakeTensor:
+            def __init__(self, cpu_value):
+                self.cpu_value = cpu_value
+
             def cpu(self):
-                return "cpu-rng"
+                return self.cpu_value
 
         class FakeCuda:
             def __init__(self):
@@ -279,8 +282,8 @@ class TrainCoreTests(unittest.TestCase):
                         {
                             "rank": 0,
                             "python": expected_python_rng,
-                            "torch_cpu": FakeTensor(),
-                            "torch_cuda": "cuda-rng",
+                            "torch_cpu": FakeTensor("cpu-rng"),
+                            "torch_cuda": FakeTensor("cuda-rng"),
                         }
                     ],
                     "optimizer_step": 3,

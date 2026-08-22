@@ -1290,7 +1290,7 @@ def _restore_checkpoint_state(
     rng = matching[0]
     random.setstate(rng["python"])
     torch.set_rng_state(rng["torch_cpu"].cpu())
-    torch.cuda.set_rng_state(rng["torch_cuda"], device=device)
+    torch.cuda.set_rng_state(rng["torch_cuda"].cpu(), device=device)
 
 
 def _recursive_file_records(root: Path) -> list[Dict[str, Any]]:
