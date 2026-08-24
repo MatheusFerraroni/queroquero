@@ -16,6 +16,10 @@ SBATCH_ARGS=(
   --time=1-00:00:00
   --export=ALL
 )
+ARRAY_LOG_ARGS=(
+  --output="${PROJECT_DIR}/logs/prepare-paired-%A_%a.out"
+  --error="${PROJECT_DIR}/logs/prepare-paired-%A_%a.err"
+)
 
 case "${MODE}" in
   capacity-all)
@@ -24,7 +28,7 @@ case "${MODE}" in
       echo "Erro: candidate_documents deve ser um inteiro positivo." >&2
       exit 2
     fi
-    sbatch "${SBATCH_ARGS[@]}" --array=0-5%1 \
+    sbatch "${SBATCH_ARGS[@]}" "${ARRAY_LOG_ARGS[@]}" --array=0-5%1 \
       "${PROJECT_DIR}/scripts/prepare_paired_real.sbatch" \
       capacity-array "${CANDIDATE_DOCUMENTS}"
     ;;
@@ -53,7 +57,7 @@ case "${MODE}" in
         exit 2
       fi
     done
-    sbatch "${SBATCH_ARGS[@]}" --array=0-5%1 \
+    sbatch "${SBATCH_ARGS[@]}" "${ARRAY_LOG_ARGS[@]}" --array=0-5%1 \
       "${PROJECT_DIR}/scripts/prepare_paired_real.sbatch" prepare
     ;;
   verify)
