@@ -1,0 +1,153 @@
+{
+  "allocation_sha256": "72ac3f40e07866c1e204a5aba81eb8e17829d28ee3587537cd38cb2bc33a6368",
+  "capacity_reports": [
+    {
+      "candidate_documents": 250000,
+      "capacity_kind": "exact",
+      "capacity_report_id": "ab43f9e129fec93b107f",
+      "capacity_report_sha256": "8d81a26fa16e2f8837ee3805bae3fd71f1efe02f5aeb45102b5523e7ca4540d6",
+      "dataset_id": "adrenaline",
+      "measured_train_capacity": 2229272
+    },
+    {
+      "candidate_documents": 350000,
+      "capacity_kind": "lower_bound",
+      "capacity_report_id": "83dcacfad420a77b9b20",
+      "capacity_report_sha256": "7a182ff4922e63ed5a22d497a3519891c820996c0bb8973ce11e3bf02337b3e3",
+      "dataset_id": "brwac",
+      "measured_train_capacity": 285989
+    },
+    {
+      "candidate_documents": 250000,
+      "capacity_kind": "lower_bound",
+      "capacity_report_id": "3700fffee1d47d1cae7d",
+      "capacity_report_sha256": "c7feb05ecb26277b5254aed10c75156566c6b3f062bddac0a1e75061b6b026dc",
+      "dataset_id": "gigaverbo",
+      "measured_train_capacity": 320506
+    },
+    {
+      "candidate_documents": 250000,
+      "capacity_kind": "exact",
+      "capacity_report_id": "9c1ca226a2917eda394e",
+      "capacity_report_sha256": "28f639fba6ab6f3dad21940455c7ef6876a41c90a5fcbe8023f31e7ddf37831b",
+      "dataset_id": "multiwoz_ptbr",
+      "measured_train_capacity": 2102
+    },
+    {
+      "candidate_documents": 250000,
+      "capacity_kind": "exact",
+      "capacity_report_id": "662dab711350e1b51d37",
+      "capacity_report_sha256": "5f4a99f52ea587005290f63a73d9e21b62eb89652c975fbb0a5654b6af3b2184",
+      "dataset_id": "outerspace",
+      "measured_train_capacity": 175254
+    },
+    {
+      "candidate_documents": 250000,
+      "capacity_kind": "exact",
+      "capacity_report_id": "6ea63d983c62e99eee54",
+      "capacity_report_sha256": "816ba8bddb901320853a9c20e35d0a060d633d0a46082812aae50f6c5357fa73",
+      "dataset_id": "wackywacky",
+      "measured_train_capacity": 467372
+    }
+  ],
+  "epochs": 1,
+  "eval_sequences_per_dataset": 256,
+  "experiment_id": "72ac3f40e07866c1e204",
+  "forum_tech_allocations": {
+    "adrenaline": 82780,
+    "brwac": 82780,
+    "gigaverbo": 82780,
+    "multiwoz_ptbr": 2102,
+    "outerspace": 82779,
+    "wackywacky": 82779
+  },
+  "general_allocations": {
+    "adrenaline": 0,
+    "brwac": 248339,
+    "gigaverbo": 82780,
+    "multiwoz_ptbr": 2102,
+    "outerspace": 0,
+    "wackywacky": 82779
+  },
+  "global_batch_sequences": 8,
+  "oversampling": false,
+  "policy": "matched_domain_substitution_without_replacement",
+  "pools": [
+    {
+      "dataset_id": "brwac",
+      "pool_id": "brwac_common",
+      "role": "shared",
+      "start_row": 0,
+      "train_sequences": 82780
+    },
+    {
+      "dataset_id": "gigaverbo",
+      "pool_id": "gigaverbo_shared",
+      "role": "shared",
+      "start_row": 0,
+      "train_sequences": 82780
+    },
+    {
+      "dataset_id": "multiwoz_ptbr",
+      "pool_id": "multiwoz_ptbr_shared",
+      "role": "shared",
+      "start_row": 0,
+      "train_sequences": 2102
+    },
+    {
+      "dataset_id": "wackywacky",
+      "pool_id": "wackywacky_shared",
+      "role": "shared",
+      "start_row": 0,
+      "train_sequences": 82779
+    },
+    {
+      "dataset_id": "adrenaline",
+      "pool_id": "adrenaline_domain",
+      "role": "domain",
+      "start_row": 0,
+      "train_sequences": 82780
+    },
+    {
+      "dataset_id": "outerspace",
+      "pool_id": "outerspace_domain",
+      "role": "domain",
+      "start_row": 0,
+      "train_sequences": 82779
+    },
+    {
+      "dataset_id": "brwac",
+      "pool_id": "brwac_extra",
+      "role": "replacement",
+      "start_row": 82780,
+      "train_sequences": 165559
+    }
+  ],
+  "prepared_train_sequences": {
+    "adrenaline": 82780,
+    "brwac": 248339,
+    "gigaverbo": 82780,
+    "multiwoz_ptbr": 2102,
+    "outerspace": 82779,
+    "wackywacky": 82779
+  },
+  "schedule": {
+    "domain_replacement_pool_id": "brwac_extra",
+    "policy": "smooth_proportional_paired_slots/v1",
+    "schedule_template_sha256": "f7666ccccbd595f097f06541239ae7a60e70f3b80b05879d2dfbb520185f5c66",
+    "slot_counts": {
+      "adrenaline_domain": 82780,
+      "brwac_common": 82780,
+      "gigaverbo_shared": 82780,
+      "multiwoz_ptbr_shared": 2102,
+      "outerspace_domain": 82779,
+      "wackywacky_shared": 82779
+    }
+  },
+  "schema_version": "queroquero-paired-real-allocation/v1",
+  "seed": 42,
+  "sequence_length": 1024,
+  "target_train_sequences_per_arm": 416000,
+  "target_train_tokens_per_arm": 425984000,
+  "total_optimizer_steps_per_arm": 52000
+}

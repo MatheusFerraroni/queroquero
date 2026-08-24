@@ -1,0 +1,164 @@
+{
+  "data_mixture": {
+    "allocation_sha256": "72ac3f40e07866c1e204a5aba81eb8e17829d28ee3587537cd38cb2bc33a6368",
+    "arm": "forum_tech",
+    "experiment_id": "72ac3f40e07866c1e204",
+    "policy": "matched_domain_substitution_without_replacement",
+    "pools": [
+      {
+        "dataset_id": "brwac",
+        "pool_id": "brwac_common",
+        "role": "shared",
+        "start_row": 0,
+        "train_sequences": 82780
+      },
+      {
+        "dataset_id": "gigaverbo",
+        "pool_id": "gigaverbo_shared",
+        "role": "shared",
+        "start_row": 0,
+        "train_sequences": 82780
+      },
+      {
+        "dataset_id": "multiwoz_ptbr",
+        "pool_id": "multiwoz_ptbr_shared",
+        "role": "shared",
+        "start_row": 0,
+        "train_sequences": 2102
+      },
+      {
+        "dataset_id": "wackywacky",
+        "pool_id": "wackywacky_shared",
+        "role": "shared",
+        "start_row": 0,
+        "train_sequences": 82779
+      },
+      {
+        "dataset_id": "adrenaline",
+        "pool_id": "adrenaline_domain",
+        "role": "domain",
+        "start_row": 0,
+        "train_sequences": 82780
+      },
+      {
+        "dataset_id": "outerspace",
+        "pool_id": "outerspace_domain",
+        "role": "domain",
+        "start_row": 0,
+        "train_sequences": 82779
+      },
+      {
+        "dataset_id": "brwac",
+        "pool_id": "brwac_extra",
+        "role": "replacement",
+        "start_row": 82780,
+        "train_sequences": 165559
+      }
+    ],
+    "preparation_profile": "paired_real",
+    "schedule_template_sha256": "f7666ccccbd595f097f06541239ae7a60e70f3b80b05879d2dfbb520185f5c66",
+    "without_replacement": true
+  },
+  "datasets": [
+    {
+      "dataset_id": "adrenaline",
+      "eval_sequences": 256,
+      "prepared_train_sequences": 82780,
+      "train_sequences": 82780
+    },
+    {
+      "dataset_id": "brwac",
+      "eval_sequences": 256,
+      "prepared_train_sequences": 248339,
+      "train_sequences": 82780
+    },
+    {
+      "dataset_id": "gigaverbo",
+      "eval_sequences": 256,
+      "prepared_train_sequences": 82780,
+      "train_sequences": 82780
+    },
+    {
+      "dataset_id": "multiwoz_ptbr",
+      "eval_sequences": 256,
+      "prepared_train_sequences": 2102,
+      "train_sequences": 2102
+    },
+    {
+      "dataset_id": "outerspace",
+      "eval_sequences": 256,
+      "prepared_train_sequences": 82779,
+      "train_sequences": 82779
+    },
+    {
+      "dataset_id": "wackywacky",
+      "eval_sequences": 256,
+      "prepared_train_sequences": 82779,
+      "train_sequences": 82779
+    }
+  ],
+  "execution": {
+    "backend": "nccl",
+    "processes_per_node": 2,
+    "strategy": "ddp",
+    "world_size": 2
+  },
+  "hardware": {
+    "accelerator": "cuda",
+    "compute_capability": [
+      8,
+      9
+    ],
+    "gpu_name_contains": "L40S",
+    "minimum_memory_gib": 44,
+    "required_arch": "sm_89",
+    "torch_cuda": "11.8",
+    "visible_gpus": 2
+  },
+  "model": {
+    "model_id": "Polygl0t/Tucano2-0.6B-Base",
+    "model_type": "llama",
+    "native_context_length": 4096,
+    "parameter_count": 670127616,
+    "revision": "dad97dc864a8f9a1d240fb9351d098f3af9511d7",
+    "trust_remote_code": false
+  },
+  "output": {
+    "artifacts_root": "artifacts",
+    "checkpoints_root": "checkpoints",
+    "runs_root": "runs"
+  },
+  "profile": "real",
+  "schema_version": "queroquero-training-config/v4",
+  "training": {
+    "betas": [
+      0.9,
+      0.95
+    ],
+    "checkpoint_steps": [
+      13000,
+      26000,
+      39000
+    ],
+    "epochs": 1,
+    "epsilon": 1e-08,
+    "global_batch_sequences": 8,
+    "global_batch_tokens": 8192,
+    "gradient_accumulation_steps_per_rank": 4,
+    "gradient_checkpointing": true,
+    "learning_rate": 5e-06,
+    "max_grad_norm": 1.0,
+    "method": "full_parameter_continual_pretraining",
+    "micro_batch_size_per_rank": 1,
+    "optimizer": "adamw",
+    "optimizer_implementation": "torch_fused",
+    "precision": "bf16",
+    "scheduler": "linear",
+    "seed": 42,
+    "sequence_length": 1024,
+    "total_optimizer_steps": 52000,
+    "use_grad_scaler": false,
+    "warmup_steps": 520,
+    "weight_decay": 0.1
+  }
+}
