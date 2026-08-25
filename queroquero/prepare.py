@@ -60,6 +60,15 @@ from .storage import WorkStore, validate_shard, write_split, write_split_increme
 
 
 LOGGER = logging.getLogger("queroquero.prepare")
+_CHECKPOINT_DOCUMENT_INTERVAL = 10_000
+_CHECKPOINT_SOURCE_INTERVAL = 1_000_000
+_SOURCE_PROGRESS_CURSOR_KEYS = (
+    "row_number",
+    "records_seen",
+    "next_member_index",
+    "dialogues_seen",
+    "next_selection_index",
+)
 _PROGRESS_CURSOR_KEYS = (
     "next_selection_index",
     "next_member_index",
@@ -78,6 +87,92 @@ _PROGRESS_CURSOR_KEYS = (
 
 class ReviewRequired(RuntimeError):
     exit_code = 20
+
+
+class _CheckpointController:
+    """Persist resumable scan state without repeatedly rewriting all candidates."""
+
+    def __init__(
+        self,
+        work: WorkStore,
+        *,
+        dataset_id: str,
+        stage: str,
+        resume_cursor: Dict[str, Any] | None,
+        resume_documents: list[Any],
+    ) -> None:
+        self._work = work
+        self._dataset_id = dataset_id
+        self._stage = stage
+        self._persisted_cursor = deepcopy(resume_cursor)
+        self._persisted_document_count = len(resume_documents)
+        self._persisted_source_progress = _cursor_source_progress(resume_cursor)
+
+    def offer(self, cursor: Dict[str, Any], documents: list[Any]) -> bool:
+        return self._persist(cursor, documents, force=False)
+
+    def finalize(self, cursor: Dict[str, Any], documents: list[Any]) -> bool:
+        return self._persist(cursor, documents, force=True)
+
+    def _persist(
+        self,
+        cursor: Dict[str, Any],
+        documents: list[Any],
+        *,
+        force: bool,
+    ) -> bool:
+        source_progress = _cursor_source_progress(cursor)
+        document_delta = len(documents) - self._persisted_document_count
+        source_baseline = self._persisted_source_progress or 0
+        source_delta = (
+            source_progress - source_baseline
+            if source_progress is not None
+            else 0
+        )
+
+        if bool(cursor.get("complete")):
+            reason = "complete"
+        elif document_delta >= _CHECKPOINT_DOCUMENT_INTERVAL:
+            reason = "documents"
+        elif source_delta >= _CHECKPOINT_SOURCE_INTERVAL:
+            reason = "source_progress"
+        elif force:
+            reason = "finalize"
+        else:
+            return False
+
+        if (
+            cursor == self._persisted_cursor
+            and len(documents) == self._persisted_document_count
+        ):
+            return False
+
+        self._work.checkpoint(cursor, documents)
+        checkpoint_bytes = self._work.candidates_path.stat().st_size
+        self._persisted_cursor = deepcopy(cursor)
+        self._persisted_document_count = len(documents)
+        self._persisted_source_progress = source_progress
+        LOGGER.info(
+            "stage=%s status=checkpoint dataset=%s reason=%s documents=%d "
+            "checkpoint_bytes=%d%s",
+            self._stage,
+            self._dataset_id,
+            reason,
+            len(documents),
+            checkpoint_bytes,
+            _cursor_progress(cursor),
+        )
+        return True
+
+
+def _cursor_source_progress(cursor: Dict[str, Any] | None) -> int | None:
+    if cursor is None:
+        return None
+    for key in _SOURCE_PROGRESS_CURSOR_KEYS:
+        value = cursor.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+    return None
 
 
 def load_adapter(name: str) -> Any:
@@ -107,15 +202,13 @@ def run_preparation(dataset_id: str, profile: str, config_root: Path | None = No
             len(resume_documents),
             _cursor_progress(resume_cursor),
         )
-
-    def save_checkpoint(cursor: Dict[str, Any], documents: list[Any]) -> None:
-        work.checkpoint(cursor, documents)
-        LOGGER.info(
-            "stage=scan status=checkpoint dataset=%s documents=%d%s",
-            dataset_id,
-            len(documents),
-            _cursor_progress(cursor),
-        )
+    checkpoints = _CheckpointController(
+        work,
+        dataset_id=dataset_id,
+        stage="scan",
+        resume_cursor=resume_cursor,
+        resume_documents=resume_documents,
+    )
 
     adapter = load_adapter(resolved["dataset"]["adapter"])
     LOGGER.info("stage=scan status=started dataset=%s", dataset_id)
@@ -123,9 +216,9 @@ def run_preparation(dataset_id: str, profile: str, config_root: Path | None = No
         resolved,
         resume_cursor=resume_cursor,
         resume_documents=resume_documents,
-        checkpoint=save_checkpoint,
+        checkpoint=checkpoints.offer,
     )
-    save_checkpoint(scan.resume_cursor or scan.cursor, scan.documents)
+    checkpoints.finalize(scan.resume_cursor or scan.cursor, scan.documents)
     LOGGER.info(
         "stage=scan status=complete dataset=%s documents=%d",
         dataset_id,
@@ -397,30 +490,22 @@ def run_capacity_audit(
         sha256_bytes(canonical_json_bytes(work_identity)),
     )
     resume_cursor, resume_documents = work.load()
-    persisted_documents = len(resume_documents)
-
-    def save_checkpoint(cursor: Dict[str, Any], documents: list[Any]) -> None:
-        nonlocal persisted_documents
-        complete = bool(cursor.get("complete"))
-        if not complete and len(documents) - persisted_documents < 10_000:
-            return
-        work.checkpoint(cursor, documents)
-        persisted_documents = len(documents)
-        LOGGER.info(
-            "stage=capacity_scan status=checkpoint dataset=%s documents=%d%s",
-            dataset_id,
-            len(documents),
-            _cursor_progress(cursor),
-        )
+    checkpoints = _CheckpointController(
+        work,
+        dataset_id=dataset_id,
+        stage="capacity_scan",
+        resume_cursor=resume_cursor,
+        resume_documents=resume_documents,
+    )
 
     adapter = load_adapter(resolved["dataset"]["adapter"])
     scan = adapter.scan(
         resolved,
         resume_cursor=resume_cursor,
         resume_documents=resume_documents,
-        checkpoint=save_checkpoint,
+        checkpoint=checkpoints.offer,
     )
-    work.checkpoint(scan.resume_cursor or scan.cursor, scan.documents)
+    checkpoints.finalize(scan.resume_cursor or scan.cursor, scan.documents)
     if scan.cursor.get("finalization_blocked"):
         raise ReviewRequired(
             f"{dataset_id} capacity audit requires the configured review decision"

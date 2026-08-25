@@ -14,6 +14,8 @@ from queroquero.config import canonical_json_bytes, sha256_bytes
 from queroquero.datasets.base import Document, ScanResult
 from queroquero.prepare import (
     ReviewRequired,
+    _CheckpointController,
+    _cursor_source_progress,
     run_capacity_audit,
     run_preparation,
     validate_preparation,
@@ -69,6 +71,24 @@ class SyntheticAdapter:
             metrics={"documents_selected": len(documents)},
             cursor={"next_index": len(documents), "complete": True},
         )
+
+
+class ChattyAdapter(SyntheticAdapter):
+    def scan(self, config, resume_cursor=None, resume_documents=None, checkpoint=None):
+        result = super().scan(
+            config,
+            resume_cursor=resume_cursor,
+            resume_documents=resume_documents,
+            checkpoint=None,
+        )
+        if checkpoint is not None:
+            for index in range(len(result.documents)):
+                complete = index + 1 == len(result.documents)
+                checkpoint(
+                    {"next_index": index + 1, "complete": complete},
+                    result.documents[: index + 1],
+                )
+        return result
 
 
 class BlockedAdapter:
@@ -236,6 +256,73 @@ def file_bytes(root: Path) -> dict[str, bytes]:
     }
 
 
+class _RecordingWorkStore:
+    def __init__(self, root: Path) -> None:
+        self.candidates_path = root / "candidates.jsonl"
+        self.calls: list[tuple[dict, int]] = []
+
+    def checkpoint(self, cursor, documents) -> None:
+        self.calls.append((dict(cursor), len(documents)))
+        self.candidates_path.write_bytes(b"x" * len(documents))
+
+
+class CheckpointControllerTests(unittest.TestCase):
+    def test_recognizes_each_supported_source_progress_cursor(self) -> None:
+        for key in (
+            "row_number",
+            "records_seen",
+            "next_member_index",
+            "dialogues_seen",
+            "next_selection_index",
+        ):
+            with self.subTest(key=key):
+                self.assertEqual(_cursor_source_progress({key: 123}), 123)
+        self.assertIsNone(_cursor_source_progress({"row_number": True}))
+        self.assertIsNone(_cursor_source_progress({"unknown": 123}))
+
+    def test_throttles_documents_source_progress_and_duplicate_final(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            work = _RecordingWorkStore(Path(temporary_dir))
+            resume_documents = list(range(500))
+            controller = _CheckpointController(
+                work,
+                dataset_id="synthetic",
+                stage="scan",
+                resume_cursor={"row_number": 100},
+                resume_documents=resume_documents,
+            )
+
+            below_document_limit = list(range(10_499))
+            self.assertFalse(
+                controller.offer({"row_number": 200}, below_document_limit)
+            )
+
+            retained_documents = list(range(10_500))
+            self.assertTrue(
+                controller.offer({"row_number": 201}, retained_documents)
+            )
+            self.assertFalse(
+                controller.offer({"row_number": 1_000_200}, retained_documents)
+            )
+            self.assertTrue(
+                controller.offer({"row_number": 1_000_201}, retained_documents)
+            )
+
+            complete_cursor = {"row_number": 1_000_202, "complete": True}
+            self.assertTrue(controller.offer(complete_cursor, retained_documents))
+            self.assertFalse(
+                controller.finalize(complete_cursor, retained_documents)
+            )
+            self.assertEqual(
+                work.calls,
+                [
+                    ({"row_number": 201}, 10_500),
+                    ({"row_number": 1_000_201}, 10_500),
+                    (complete_cursor, 10_500),
+                ],
+            )
+
+
 class PreparationIntegrationTests(unittest.TestCase):
     def test_capacity_audit_is_private_capped_exact_and_resumable(self) -> None:
         resolved, _ = resolved_config(profile="mvp")
@@ -302,8 +389,9 @@ class PreparationIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_dir:
             project = Path(temporary_dir)
             output_roots = [project / "first", project / "second"]
+            adapters = [SyntheticAdapter(), ChattyAdapter()]
             manifests = []
-            for output_root in output_roots:
+            for output_root, adapter in zip(output_roots, adapters, strict=True):
                 with (
                     patch(
                         "queroquero.prepare.load_resolved_config",
@@ -313,15 +401,24 @@ class PreparationIntegrationTests(unittest.TestCase):
                         "queroquero.prepare.resolve_output_root",
                         return_value=output_root,
                     ),
-                    patch("queroquero.prepare.load_adapter", return_value=SyntheticAdapter()),
+                    patch("queroquero.prepare.load_adapter", return_value=adapter),
                     patch(
                         "queroquero.prepare._load_pinned_tokenizer",
                         return_value=FakeTokenizer(),
                     ),
                     patch("queroquero.prepare.PROJECT_ROOT", project.resolve()),
                     redirect_stdout(io.StringIO()),
+                    self.assertLogs("queroquero.prepare", level="INFO") as logs,
                 ):
                     manifests.append(run_preparation("brwac", "smoke"))
+                checkpoint_logs = [
+                    line
+                    for line in logs.output
+                    if "stage=scan status=checkpoint" in line
+                ]
+                self.assertEqual(len(checkpoint_logs), 1)
+                self.assertIn("reason=complete", checkpoint_logs[0])
+                self.assertIn("checkpoint_bytes=", checkpoint_logs[0])
 
             first_root = manifests[0].parent
             second_root = manifests[1].parent
