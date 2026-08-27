@@ -51,6 +51,11 @@ descartada e contabilizada.
 Os limites e regras de cada fonte ficam em `configs/datasets/`; as regras
 comuns ficam em `configs/preparation.json`.
 
+O snapshot rotulado do Adrenaline também pode ser preparado como dataset
+canônico, privado e sem split para a avaliação downstream. O contrato e os
+comandos estão em
+[`docs/classification-dataset.md`](docs/classification-dataset.md).
+
 ## Instalação
 
 Use Python 3.12 em um ambiente virtual gerenciado pelo `uv` para preparação:
@@ -167,6 +172,8 @@ somente `.venv/bin/python` e mantêm o cache do `uv` em `cache/uv` por padrão.
 | `scripts/submit_l40s.sh` | Submeter os modos explícitos Geral/Fórum-Tec em duas L40S, sem fixar nó. |
 | `scripts/submit_paired_preparation.sh` | Submeter auditoria, preparação serial e verificação pareada via Slurm. |
 | `scripts/train_l40s.sbatch` | Executar os modos distribuídos com `torchrun`. |
+| `scripts/submit_classification.sh` | Preparar, validar e criar splits determinísticos do benchmark Adrenaline. |
+| `scripts/prepare_classification.sbatch` | Executar a preparação privada CPU-only no Slurm por até 24 horas. |
 
 O fluxo de auditoria, alocação sem reposição e dois treinos pareados de
 aproximadamente 12 horas cada está em

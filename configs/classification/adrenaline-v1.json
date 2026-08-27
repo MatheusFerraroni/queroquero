@@ -1,0 +1,85 @@
+{
+  "benchmark": {
+    "coarse": {
+      "category_ids": [
+        3,
+        8,
+        19,
+        23,
+        26,
+        32
+      ],
+      "maximum_examples_per_class": 2000
+    },
+    "fine": {
+      "category_ids": [
+        3,
+        8,
+        19,
+        23,
+        26,
+        32
+      ],
+      "examples_per_class": 1000,
+      "minimum_unique_title_groups": 1000
+    },
+    "input_variants": [
+      "title",
+      "title_first_post"
+    ],
+    "seeds": [
+      42,
+      43,
+      44,
+      45,
+      46
+    ],
+    "split_percentages": {
+      "test": 15,
+      "train": 70,
+      "validation": 15
+    }
+  },
+  "cleaning": {
+    "strip_control_characters": true,
+    "strip_html": true,
+    "unicode_normalization": "NFC",
+    "whitespace": "conservative"
+  },
+  "dataset_id": "adrenaline",
+  "output": {
+    "compression": "zstd",
+    "csv_compression": "gzip-mtime-zero",
+    "root_env": "PTBR_CLASSIFICATION_ROOT"
+  },
+  "schema_version": "queroquero-classification-data-config/v1",
+  "source": {
+    "cpt_manifest": {
+      "preparation_id": "e6633d5c464775d98691",
+      "relative_path": "adrenaline/e6633d5c464775d98691/dataset_manifest.json",
+      "root_env": "PTBR_OUTPUT_ROOT",
+      "sha256": "45598ad637a8d7e709fcca7b6c9ff3ff303f9c23d847fdac4694af2755c2cc65"
+    },
+    "dataset_root_env": "PTBR_DATASET_ROOT",
+    "expected": {
+      "forum": {
+        "archive_size_bytes": 2157145545,
+        "central_directory_entries": 356799,
+        "labeled_thread_references": 356763,
+        "mapping_entries": 29,
+        "sha256": "de54e164fb1a328177913670f6c881420e36883bee6f77167b3e7e83b596cb3d",
+        "thread_json_entries": 356764,
+        "unlabeled_thread_entries": 1
+      },
+      "pretraining": {
+        "archive_size_bytes": 76123303722,
+        "central_directory_entries": 4896419,
+        "eligible_member_count": 4896418,
+        "sha256": "c6fa1420021e52e0f9bf43d1fdae4f05ce6cc98f2b6751083344255ed58d2004"
+      }
+    },
+    "forum_archive": "adrenaline/forum.adrenaline.com.br.zip",
+    "forum_prefix": "forum.adrenaline.com.br",
+    "pretraining_archive": "adrenaline/conversations.zip"
+  }
+}
