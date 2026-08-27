@@ -4,6 +4,7 @@ import argparse
 import csv
 import gzip
 import hashlib
+import html
 import io
 import json
 import logging
@@ -39,6 +40,15 @@ DATASET_MANIFEST_SCHEMA = "queroquero-classification-dataset-manifest/v1"
 AUDIT_SCHEMA = "queroquero-classification-audit/v1"
 WORK_SCHEMA = "queroquero-classification-work/v1"
 REDISTRIBUTION_STATUS = "internal_research_only"
+HTML_ENTITY_POLICY = "html_entities_until_stable_max_8"
+MAX_HTML_ENTITY_DECODES = 8
+CLASSIFICATION_CLEANING_POLICY = {
+    "html_entity_policy": HTML_ENTITY_POLICY,
+    "unicode_normalization": "NFC",
+    "strip_html": True,
+    "strip_control_characters": True,
+    "whitespace": "conservative",
+}
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _ID20_RE = re.compile(r"[0-9a-f]{20}\Z")
@@ -177,12 +187,7 @@ def validate_classification_config(config: Dict[str, Any]) -> None:
     _sha256(pretraining, "sha256", "pretraining fingerprint")
 
     cleaning = _object(config, "cleaning")
-    if cleaning != {
-        "unicode_normalization": "NFC",
-        "strip_html": True,
-        "strip_control_characters": True,
-        "whitespace": "conservative",
-    }:
+    if cleaning != CLASSIFICATION_CLEANING_POLICY:
         raise ConfigError("classification cleaning policy changed")
 
     output = _object(config, "output")
@@ -223,6 +228,46 @@ def validate_classification_config(config: Dict[str, Any]) -> None:
         "examples_per_class": 1000,
     }:
         raise ConfigError("fine benchmark contract changed")
+
+
+def _canonicalize_classification_text(
+    value: str,
+    *,
+    max_entity_decodes: int = MAX_HTML_ENTITY_DECODES,
+) -> str | None:
+    """Return stable classification text, or None when decoding does not converge."""
+    if not isinstance(value, str):
+        raise TypeError("classification text must be a string")
+    if (
+        not isinstance(max_entity_decodes, int)
+        or isinstance(max_entity_decodes, bool)
+        or max_entity_decodes < 1
+    ):
+        raise ValueError("max_entity_decodes must be a positive integer")
+
+    decoded = value
+    for _ in range(max_entity_decodes):
+        next_value = html.unescape(decoded)
+        if next_value == decoded:
+            break
+        decoded = next_value
+    else:
+        if html.unescape(decoded) != decoded:
+            return None
+
+    canonical = clean_text(decoded, strip_html=True)
+    verification_input = canonical
+    for _ in range(max_entity_decodes):
+        next_value = html.unescape(verification_input)
+        if next_value == verification_input:
+            break
+        verification_input = next_value
+    else:
+        if html.unescape(verification_input) != verification_input:
+            return None
+    if clean_text(verification_input, strip_html=True) != canonical:
+        return None
+    return canonical
 
 
 def _resolve_env_root(name: str) -> Path:
@@ -545,7 +590,10 @@ def _load_forum_labels(
             or category_id in category_names
         ):
             raise RuntimeError("forum category contract changed")
-        category_names[category_id] = clean_text(category_name, strip_html=True)
+        canonical_category_name = _canonicalize_classification_text(category_name)
+        if not canonical_category_name:
+            raise RuntimeError("forum category name is not canonicalizable")
+        category_names[category_id] = canonical_category_name
         for subcategory in subcategories:
             if not isinstance(subcategory, dict):
                 raise RuntimeError("forum subcategory record is invalid")
@@ -560,7 +608,12 @@ def _load_forum_labels(
                 or key in subcategory_names
             ):
                 raise RuntimeError("forum subcategory contract changed")
-            subcategory_names[key] = clean_text(subcategory_name, strip_html=True)
+            canonical_subcategory_name = _canonicalize_classification_text(
+                subcategory_name
+            )
+            if not canonical_subcategory_name:
+                raise RuntimeError("forum subcategory name is not canonicalizable")
+            subcategory_names[key] = canonical_subcategory_name
             if subcategory.get("complete") is not True:
                 incomplete_subcategory_metadata += 1
 
@@ -992,8 +1045,17 @@ def _extract_thread_parts(
             ):
                 chunk_counts["discarded_missing_first_post"] += 1
                 continue
-            title = clean_text(raw_title, strip_html=True)
-            first_post = clean_text(messages[0]["message"], strip_html=True)
+            title = _canonicalize_classification_text(raw_title)
+            first_post = _canonicalize_classification_text(
+                messages[0]["message"]
+            )
+            if title is None or first_post is None:
+                if title is None:
+                    chunk_counts["discarded_noncanonical_title"] += 1
+                if first_post is None:
+                    chunk_counts["discarded_noncanonical_first_post"] += 1
+                chunk_counts["discarded_noncanonical_text"] += 1
+                continue
             if not title:
                 chunk_counts["discarded_empty_title"] += 1
                 continue
@@ -1064,6 +1126,12 @@ def _extract_thread_parts(
         LOGGER.info("stage=extract status=resumed_complete parts=%d", len(parts))
     if counts["thread_entries_seen"] != len(thread_infos):
         raise RuntimeError("classification extraction did not cover every thread")
+    for key in (
+        "discarded_noncanonical_title",
+        "discarded_noncanonical_first_post",
+        "discarded_noncanonical_text",
+    ):
+        counts.setdefault(key, 0)
     LOGGER.info(
         "stage=extract status=complete threads=%d candidates=%d",
         counts["thread_entries_seen"],
@@ -1232,6 +1300,7 @@ def _finalize_dataset(
             "schema_version": AUDIT_SCHEMA,
             "classification_dataset_id": classification_dataset_id,
             "policy": {
+                "canonicalization": HTML_ENTITY_POLICY,
                 "cpt_overlap": "exclude_train_and_eval",
                 "deduplication": "exact_title_first_post/v1",
                 "missing_text": "exclude",
@@ -1436,6 +1505,8 @@ def validate_classification_dataset(path: Path) -> Dict[str, Any]:
         or manifest.get("redistribution_status") != REDISTRIBUTION_STATUS
     ):
         raise RuntimeError("classification manifest identity is invalid")
+    if manifest.get("cleaning") != CLASSIFICATION_CLEANING_POLICY:
+        raise RuntimeError("classification cleaning policy is invalid")
     _assert_private_safe_metadata(manifest)
     source = manifest.get("source")
     if not isinstance(source, dict):
@@ -1514,8 +1585,36 @@ def validate_classification_dataset(path: Path) -> Dict[str, Any]:
         or audit.get("classification_dataset_id")
         != manifest["classification_dataset_id"]
         or audit.get("redistribution_status") != REDISTRIBUTION_STATUS
+        or not isinstance(audit.get("policy"), dict)
+        or audit["policy"].get("canonicalization") != HTML_ENTITY_POLICY
     ):
         raise RuntimeError("classification audit is invalid")
+    extraction_counts = audit.get("extraction_counts")
+    if not isinstance(extraction_counts, dict):
+        raise RuntimeError("classification extraction counts are invalid")
+    for key in (
+        "discarded_noncanonical_title",
+        "discarded_noncanonical_first_post",
+        "discarded_noncanonical_text",
+    ):
+        value = extraction_counts.get(key)
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+        ):
+            raise RuntimeError("classification extraction counts are invalid")
+    noncanonical_records = extraction_counts["discarded_noncanonical_text"]
+    noncanonical_title = extraction_counts["discarded_noncanonical_title"]
+    noncanonical_first_post = extraction_counts[
+        "discarded_noncanonical_first_post"
+    ]
+    if not (
+        max(noncanonical_title, noncanonical_first_post)
+        <= noncanonical_records
+        <= noncanonical_title + noncanonical_first_post
+    ):
+        raise RuntimeError("classification extraction counts are inconsistent")
     _assert_private_safe_metadata(audit)
 
     category_names = _read_categories(root / "categories.csv")
@@ -1580,10 +1679,10 @@ def _validate_examples_table(
         if (
             not isinstance(title, str)
             or not title
-            or clean_text(title, strip_html=True) != title
+            or _canonicalize_classification_text(title) != title
             or not isinstance(first_post, str)
             or not first_post
-            or clean_text(first_post, strip_html=True) != first_post
+            or _canonicalize_classification_text(first_post) != first_post
         ):
             raise RuntimeError("classification text is not canonically cleaned")
         if (
@@ -1621,9 +1720,14 @@ def _read_categories(path: Path) -> Dict[int, str]:
                 key = int(row["category_id"])
             except (TypeError, ValueError):
                 raise RuntimeError("classification category ID is invalid") from None
-            if key in result or not row["category_name"]:
+            name = row["category_name"]
+            if (
+                key in result
+                or not name
+                or _canonicalize_classification_text(name) != name
+            ):
                 raise RuntimeError("classification category table is invalid")
-            result[key] = row["category_name"]
+            result[key] = name
     if not result:
         raise RuntimeError("classification category table is empty")
     return result
@@ -1644,9 +1748,14 @@ def _read_subcategories(path: Path) -> Dict[tuple[int, int], str]:
                 key = (int(row["category_id"]), int(row["subcategory_id"]))
             except (TypeError, ValueError):
                 raise RuntimeError("classification subcategory ID is invalid") from None
-            if key in result or not row["subcategory_name"]:
+            name = row["subcategory_name"]
+            if (
+                key in result
+                or not name
+                or _canonicalize_classification_text(name) != name
+            ):
                 raise RuntimeError("classification subcategory table is invalid")
-            result[key] = row["subcategory_name"]
+            result[key] = name
     if not result:
         raise RuntimeError("classification subcategory table is empty")
     return result

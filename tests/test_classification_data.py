@@ -1,3 +1,4 @@
+import html
 import json
 import tempfile
 import unittest
@@ -11,10 +12,12 @@ import pyarrow.parquet as pq
 
 from queroquero.classification_data import (
     AUDIT_SCHEMA,
+    CLASSIFICATION_CLEANING_POLICY,
     CONFIG_SCHEMA,
     DATASET_MANIFEST_SCHEMA,
     FINAL_SCHEMA,
     REDISTRIBUTION_STATUS,
+    _canonicalize_classification_text,
     _dataset_identity,
     _file_record,
     _table_row_digest,
@@ -41,6 +44,46 @@ VERSIONED_CONFIG = PROJECT_ROOT / "configs/classification/adrenaline-v1.json"
 
 
 class ClassificationDatasetTests(unittest.TestCase):
+    def test_classification_text_canonicalization_is_stable(self) -> None:
+        variants = (
+            "Antes<br>Depois",
+            "Antes&lt;br&gt;Depois",
+            "Antes&amp;lt;br&amp;gt;Depois",
+        )
+        for value in variants:
+            with self.subTest(value=value):
+                canonical = _canonicalize_classification_text(value)
+                self.assertEqual(canonical, "Antes\nDepois")
+                self.assertEqual(
+                    _canonicalize_classification_text(canonical), canonical
+                )
+
+        self.assertEqual(
+            _canonicalize_classification_text(
+                "Texto comum &amp; pontuação: (ok), sim."
+            ),
+            "Texto comum & pontuação: (ok), sim.",
+        )
+        self.assertEqual(
+            _canonicalize_classification_text("Texto <b sem fechamento"),
+            "Texto <b sem fechamento",
+        )
+        self.assertEqual(
+            _canonicalize_classification_text("Texto <b>incompleto"),
+            "Texto incompleto",
+        )
+
+    def test_classification_text_canonicalization_is_bounded(self) -> None:
+        eight_levels = "<b>Texto</b>"
+        for _ in range(8):
+            eight_levels = html.escape(eight_levels, quote=False)
+        self.assertEqual(
+            _canonicalize_classification_text(eight_levels), "Texto"
+        )
+
+        nine_levels = html.escape(eight_levels, quote=False)
+        self.assertIsNone(_canonicalize_classification_text(nine_levels))
+
     def test_slurm_preparation_is_cpu_only_and_limited_to_24_hours(self) -> None:
         batch = (PROJECT_ROOT / "scripts/prepare_classification.sbatch").read_text()
         submit = (PROJECT_ROOT / "scripts/submit_classification.sh").read_text()
@@ -51,8 +94,17 @@ class ClassificationDatasetTests(unittest.TestCase):
     def test_versioned_configuration_is_strict_and_resolvable(self) -> None:
         config, digest = load_classification_config(VERSIONED_CONFIG)
         self.assertEqual(config["schema_version"], CONFIG_SCHEMA)
+        self.assertEqual(config["cleaning"], CLASSIFICATION_CLEANING_POLICY)
         self.assertEqual(config["benchmark"]["seeds"], [42, 43, 44, 45, 46])
         self.assertEqual(len(digest), 64)
+
+        legacy_cleaning = deepcopy(config)
+        legacy_cleaning["cleaning"].pop("html_entity_policy")
+        self.assertNotEqual(
+            digest, sha256_bytes(canonical_json_bytes(legacy_cleaning))
+        )
+        with self.assertRaisesRegex(ConfigError, "cleaning policy"):
+            validate_classification_config(legacy_cleaning)
 
         changed = deepcopy(config)
         changed["unknown"] = True
@@ -120,6 +172,20 @@ class ClassificationDatasetTests(unittest.TestCase):
             )
             self.assertEqual(
                 audit["deduplication_counts"]["conflicting_content_records"], 2
+            )
+            self.assertEqual(
+                audit["extraction_counts"]["discarded_noncanonical_title"], 1
+            )
+            self.assertEqual(
+                audit["extraction_counts"]["discarded_noncanonical_first_post"],
+                1,
+            )
+            self.assertEqual(
+                audit["extraction_counts"]["discarded_noncanonical_text"], 2
+            )
+            self.assertEqual(
+                audit["policy"]["canonicalization"],
+                "html_entities_until_stable_max_8",
             )
             self.assertFalse(
                 fixture["output_root"].joinpath(".work").exists()
@@ -321,7 +387,7 @@ def _build_source_fixture(root: Path, unresolved_hash: bool = False):
     categories = [
         {
             "id": 3,
-            "title_text": "Tecnologia A",
+            "title_text": "Tecnologia &amp;lt;b&amp;gt;A&amp;lt;/b&amp;gt;",
             "subs": [{"id": 0, "title_text": "Subcategoria A", "complete": False}],
         },
         {
@@ -330,8 +396,15 @@ def _build_source_fixture(root: Path, unresolved_hash: bool = False):
             "subs": [{"id": 4, "title_text": "Subcategoria B", "complete": False}],
         },
     ]
-    labels_a = [100, 101, 102, 103, 105, 107, 108, 109]
+    labels_a = [100, 101, 102, 103, 105, 107, 108, 109, 110, 111]
     labels_b = [106]
+    noncanonical_title = "<b>Título sintético</b>"
+    noncanonical_first_post = "<b>Primeiro post sintético</b>"
+    for _ in range(9):
+        noncanonical_title = html.escape(noncanonical_title, quote=False)
+        noncanonical_first_post = html.escape(
+            noncanonical_first_post, quote=False
+        )
     with ZipFile(forum, "w") as archive:
         archive.writestr(f"{prefix}/categories.json", json.dumps(categories))
         archive.writestr(
@@ -345,7 +418,13 @@ def _build_source_fixture(root: Path, unresolved_hash: bool = False):
         records = {
             100: _thread(100, 3, 0, "Sobreposto treino", "Texto privado A"),
             101: _thread(101, 3, 0, "Sobreposto avaliação", "Texto privado B"),
-            102: _thread(102, 3, 0, "<b>Título elegível</b>", "Primeiro<br>post"),
+            102: _thread(
+                102,
+                3,
+                0,
+                "&amp;lt;b&amp;gt;Título elegível&amp;lt;/b&amp;gt;",
+                "Primeiro&lt;br&gt;post",
+            ),
             103: _thread(103, 3, 0, "Sem primeiro post", None),
             104: _thread(104, 3, 0, "Sem rótulo", "Texto"),
             105: _thread(105, 3, 0, "Conflito", "Mesmo conteúdo"),
@@ -353,6 +432,8 @@ def _build_source_fixture(root: Path, unresolved_hash: bool = False):
             107: _thread(107, 3, 0, "Duplicado", "Mesmo rótulo"),
             108: _thread(108, 3, 0, "Duplicado", "Mesmo rótulo"),
             109: _thread(109, 3, 0, "<br>", "Texto"),
+            110: _thread(110, 3, 0, noncanonical_title, "Texto"),
+            111: _thread(111, 3, 0, "Título", noncanonical_first_post),
         }
         for thread_id, record in records.items():
             archive.writestr(
@@ -372,7 +453,7 @@ def _build_source_fixture(root: Path, unresolved_hash: bool = False):
     config["source"]["expected"] = {
         "forum": {
             **forum_fingerprint,
-            "labeled_thread_references": 9,
+            "labeled_thread_references": 11,
             "unlabeled_thread_entries": 1,
         },
         "pretraining": pretraining_fingerprint,
@@ -485,6 +566,12 @@ def _build_split_dataset(root: Path) -> Path:
     audit = {
         "schema_version": AUDIT_SCHEMA,
         "classification_dataset_id": dataset_id,
+        "policy": {"canonicalization": "html_entities_until_stable_max_8"},
+        "extraction_counts": {
+            "discarded_noncanonical_title": 0,
+            "discarded_noncanonical_first_post": 0,
+            "discarded_noncanonical_text": 0,
+        },
         "redistribution_status": REDISTRIBUTION_STATUS,
     }
     write_json_atomic(dataset_path / "audit.json", audit)
@@ -503,6 +590,7 @@ def _build_split_dataset(root: Path) -> Path:
         "classification_dataset_id": dataset_id,
         "dataset_id": "adrenaline",
         "config_sha256": config_sha256,
+        "cleaning": dict(CLASSIFICATION_CLEANING_POLICY),
         "source": {
             "forum_fingerprint": forum_fingerprint,
             "pretraining_fingerprint": pretraining_fingerprint,

@@ -41,6 +41,7 @@
     }
   },
   "cleaning": {
+    "html_entity_policy": "html_entities_until_stable_max_8",
     "strip_control_characters": true,
     "strip_html": true,
     "unicode_normalization": "NFC",

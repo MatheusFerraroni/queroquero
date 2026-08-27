@@ -15,6 +15,12 @@ contrário, a preparação falha. Títulos e primeiros posts vazios também são
 excluídos. Conteúdo exato repetido com o mesmo rótulo conserva um exemplo;
 conflitos de rótulo removem o grupo inteiro.
 
+A limpeza decodifica entidades HTML até estabilizar, com no máximo oito
+iterações, e só então remove marcação, caracteres de controle e espaços
+redundantes sob NFC. Registros que ultrapassem esse limite são descartados e
+contabilizados apenas de forma agregada. Essa política é versionada como
+`html_entities_until_stable_max_8` e também se aplica aos nomes dos rótulos.
+
 O resultado não possui coluna ou diretório de split:
 
 ```text
