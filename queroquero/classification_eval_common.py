@@ -689,7 +689,11 @@ def _read_json(path: Path, description: str) -> Dict[str, Any]:
     return value
 
 
-def _assert_safe_metadata(value: Any, key: str | None = None) -> None:
+def _assert_safe_metadata(
+    value: Any,
+    key: str | None = None,
+    path: tuple[str, ...] = (),
+) -> None:
     forbidden = {
         "title",
         "first_post",
@@ -699,14 +703,22 @@ def _assert_safe_metadata(value: Any, key: str | None = None) -> None:
         "input_ids",
         "predictions",
     }
-    if key in forbidden:
+    policy_title = (
+        path[-2:] == ("input_variants", "title") and value == "title"
+    )
+    if key in forbidden and not policy_title:
         raise RuntimeError("classification evaluation metadata contains private data")
     if isinstance(value, Mapping):
         for nested_key, nested in value.items():
-            _assert_safe_metadata(nested, str(nested_key))
+            nested_name = str(nested_key)
+            _assert_safe_metadata(
+                nested,
+                nested_name,
+                (*path, nested_name),
+            )
     elif isinstance(value, list):
         for nested in value:
-            _assert_safe_metadata(nested, key)
+            _assert_safe_metadata(nested, key, path)
     elif isinstance(value, str) and (
         Path(value).is_absolute() or re.match(r"^[A-Za-z]:[\\/]", value)
     ):

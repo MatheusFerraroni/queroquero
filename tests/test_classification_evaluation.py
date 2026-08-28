@@ -13,6 +13,7 @@ from queroquero.classification_eval_common import (
     POOLINGS,
     SELECTION_SCHEMA,
     TUNING_UNIT_SCHEMA,
+    assert_safe_metadata,
     load_evaluation_config,
     unit_by_index,
     validate_evaluation_config,
@@ -44,6 +45,15 @@ class ClassificationEvaluationTests(unittest.TestCase):
         changed["embedding"]["max_length"] = 512
         with self.assertRaisesRegex(ConfigError, "embedding policy"):
             validate_evaluation_config(changed)
+
+    def test_safe_metadata_allows_only_the_versioned_title_policy_key(self) -> None:
+        config, _ = load_evaluation_config(CONFIG_PATH)
+        assert_safe_metadata({"embedding": config["embedding"]})
+
+        with self.assertRaisesRegex(RuntimeError, "private data"):
+            assert_safe_metadata({"title": "private title"})
+        with self.assertRaisesRegex(RuntimeError, "private data"):
+            assert_safe_metadata({"input_variants": {"title": "changed"}})
 
     def test_unit_index_covers_seed_task_and_input_matrix(self) -> None:
         config, _ = load_evaluation_config(CONFIG_PATH)
