@@ -590,6 +590,13 @@ def assert_safe_metadata(value: Any) -> None:
     _assert_safe_metadata(value)
 
 
+def validate_resolved_evaluation(
+    value: Mapping[str, Any], config: Mapping[str, Any]
+) -> None:
+    """Validate a stored evaluation without binding it to the current Git HEAD."""
+    _validate_resolved_shape(value, config)
+
+
 def _validate_resolved_shape(
     value: Mapping[str, Any], config: Mapping[str, Any]
 ) -> None:

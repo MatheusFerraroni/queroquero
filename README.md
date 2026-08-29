@@ -57,6 +57,8 @@ comandos estão em
 [`docs/classification-dataset.md`](docs/classification-dataset.md).
 A avaliação pareada posterior por embeddings e regressão logística está em
 [`docs/classification-evaluation.md`](docs/classification-evaluation.md).
+As curvas low-shot, NLL condicional inédita e dose por checkpoints estão em
+[`docs/classification-diagnostics.md`](docs/classification-diagnostics.md).
 
 ## Instalação
 
@@ -180,6 +182,9 @@ somente `.venv/bin/python` e mantêm o cache do `uv` em `cache/uv` por padrão.
 | `scripts/submit_classification_evaluation.sh` | Submeter preflight, embeddings, tuning, avaliação final e relatório pareado. |
 | `scripts/classification_embeddings.sbatch` | Extrair embeddings em duas L40S com Gloo e chunks retomáveis. |
 | `scripts/classification_probe.sbatch` | Executar os arrays CPU de regressão logística e os relatórios. |
+| `scripts/submit_classification_diagnostics.sh` | Submeter coorte, low-shot, NLL por estado e relatório diagnóstico. |
+| `scripts/classification_diagnostics_cpu.sbatch` | Executar preparação, low-shot e validações diagnósticas em CPU. |
+| `scripts/classification_diagnostics_gpu.sbatch` | Executar preflight e NLL em uma L40S, sem DDP/NCCL. |
 
 O fluxo de auditoria, alocação sem reposição e dois treinos pareados de
 aproximadamente 12 horas cada está em

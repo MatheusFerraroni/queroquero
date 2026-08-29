@@ -411,7 +411,7 @@ def finalize_embedding_manifest(
     return manifest
 
 
-def validate_embedding_manifests(
+def verify_embedding_manifests(
     config: Mapping[str, Any],
     resolved: Mapping[str, Any],
     evaluation_dir: Path,
@@ -494,6 +494,15 @@ def validate_embedding_manifests(
         },
         "status": "valid",
     }
+    return result
+
+
+def validate_embedding_manifests(
+    config: Mapping[str, Any],
+    resolved: Mapping[str, Any],
+    evaluation_dir: Path,
+) -> Dict[str, Any]:
+    result = verify_embedding_manifests(config, resolved, evaluation_dir)
     target = evaluation_dir / "embeddings_validation.json"
     write_json_atomic(target, result)
     target.chmod(0o600)
