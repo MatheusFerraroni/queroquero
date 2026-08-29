@@ -59,16 +59,23 @@ from .training_config import load_training_config
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_CONFIG = Path("configs/classification/diagnostics-v1.json")
-CONFIG_SCHEMA = "queroquero-cpt-diagnostics-config/v1"
-RESOLVED_SCHEMA = "queroquero-resolved-cpt-diagnostics/v1"
-COHORT_SCHEMA = "queroquero-cpt-diagnostic-cohort/v1"
+DEFAULT_CONFIG = Path("configs/classification/diagnostics-v2.json")
+CONFIG_SCHEMA_V1 = "queroquero-cpt-diagnostics-config/v1"
+CONFIG_SCHEMA_V2 = "queroquero-cpt-diagnostics-config/v2"
+CONFIG_SCHEMA = CONFIG_SCHEMA_V1
+RESOLVED_SCHEMA_V1 = "queroquero-resolved-cpt-diagnostics/v1"
+RESOLVED_SCHEMA_V2 = "queroquero-resolved-cpt-diagnostics/v2"
+COHORT_SCHEMA_V1 = "queroquero-cpt-diagnostic-cohort/v1"
+COHORT_SCHEMA_V2 = "queroquero-cpt-diagnostic-cohort/v2"
+COHORT_CAPACITY_SCHEMA = "queroquero-cpt-diagnostic-cohort-capacity/v1"
 PREFLIGHT_SCHEMA = "queroquero-cpt-diagnostic-preflight/v1"
 LOW_SHOT_UNIT_SCHEMA = "queroquero-cpt-low-shot-unit/v1"
 SCORE_CHUNK_SCHEMA = "queroquero-cpt-nll-score-chunk/v1"
 SCORE_MANIFEST_SCHEMA = "queroquero-cpt-nll-score-manifest/v1"
 SCORE_VALIDATION_SCHEMA = "queroquero-cpt-nll-score-validation/v1"
-REPORT_SCHEMA = "queroquero-cpt-diagnostics-report/v1"
+REPORT_SCHEMA_V1 = "queroquero-cpt-diagnostics-report/v1"
+REPORT_SCHEMA_V2 = "queroquero-cpt-diagnostics-report/v2"
+REPORT_SCHEMA = REPORT_SCHEMA_V1
 REPORT_FILES_SCHEMA = "queroquero-cpt-diagnostics-report-files/v1"
 REDISTRIBUTION_STATUS = "internal_research_only"
 
@@ -130,8 +137,9 @@ def validate_diagnostics_config(config: Mapping[str, Any]) -> None:
         },
         "diagnostics configuration",
     )
-    if config["schema_version"] != CONFIG_SCHEMA:
-        raise ConfigError(f"diagnostics schema must be {CONFIG_SCHEMA!r}")
+    schema_version = config["schema_version"]
+    if schema_version not in {CONFIG_SCHEMA_V1, CONFIG_SCHEMA_V2}:
+        raise ConfigError("diagnostics schema is unsupported")
 
     source = _mapping(config, "source_evaluation")
     _keys(
@@ -272,6 +280,8 @@ def validate_diagnostics_config(config: Mapping[str, Any]) -> None:
         "primary_contrast": "general_minus_base",
         "status": "exploratory_post_hoc",
     }
+    if schema_version == CONFIG_SCHEMA_V2:
+        expected_low_shot["categories"] = list(CATEGORIES)
     if dict(low_shot) != expected_low_shot:
         raise ConfigError("diagnostics low-shot policy changed")
 
@@ -293,6 +303,8 @@ def validate_diagnostics_config(config: Mapping[str, Any]) -> None:
         "chunk_size": 256,
         "primary_contrast": "forum_minus_general",
     }
+    if schema_version == CONFIG_SCHEMA_V2:
+        expected_nll["prior_split_exclusion"] = "test_only"
     if dict(nll) != expected_nll:
         raise ConfigError("diagnostics NLL policy changed")
 
@@ -315,15 +327,109 @@ def validate_diagnostics_config(config: Mapping[str, Any]) -> None:
 
 
 def state_by_index(config: Mapping[str, Any], index: int) -> Dict[str, Any]:
-    if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < 9:
+    if (
+        not isinstance(index, int)
+        or isinstance(index, bool)
+        or not 0 <= index < len(config["states"])
+    ):
         raise ValueError("diagnostics state index must be between 0 and 8")
     return dict(config["states"][index])
 
 
 def low_shot_seed(config: Mapping[str, Any], index: int) -> int:
-    if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < 5:
+    seeds = tuple(int(value) for value in config["low_shot"]["seeds"])
+    if (
+        not isinstance(index, int)
+        or isinstance(index, bool)
+        or not 0 <= index < len(seeds)
+    ):
         raise ValueError("low-shot unit index must be between 0 and 4")
-    return int(config["low_shot"]["seeds"][index])
+    return seeds[index]
+
+
+def _prior_split_exclusion(config: Mapping[str, Any]) -> str:
+    if config["schema_version"] == CONFIG_SCHEMA_V1:
+        return "all_partitions"
+    return str(config["nll"]["prior_split_exclusion"])
+
+
+def _resolved_schema(config: Mapping[str, Any]) -> str:
+    return (
+        RESOLVED_SCHEMA_V1
+        if config["schema_version"] == CONFIG_SCHEMA_V1
+        else RESOLVED_SCHEMA_V2
+    )
+
+
+def _cohort_schema(config: Mapping[str, Any]) -> str:
+    return (
+        COHORT_SCHEMA_V1
+        if config["schema_version"] == CONFIG_SCHEMA_V1
+        else COHORT_SCHEMA_V2
+    )
+
+
+def _report_schema(config: Mapping[str, Any]) -> str:
+    return (
+        REPORT_SCHEMA_V1
+        if config["schema_version"] == CONFIG_SCHEMA_V1
+        else REPORT_SCHEMA_V2
+    )
+
+
+def _low_shot_categories(config: Mapping[str, Any]) -> tuple[int, ...]:
+    values = config["low_shot"].get("categories", CATEGORIES)
+    return tuple(int(value) for value in values)
+
+
+def _low_shot_budgets(config: Mapping[str, Any]) -> tuple[int, ...]:
+    return tuple(int(value) for value in config["low_shot"]["budgets_per_class"])
+
+
+def _low_shot_seeds(config: Mapping[str, Any]) -> tuple[int, ...]:
+    return tuple(int(value) for value in config["low_shot"]["seeds"])
+
+
+def _low_shot_fits(config: Mapping[str, Any]) -> int:
+    return (
+        len(MODEL_NAMES)
+        * len(_low_shot_budgets(config))
+        * len(_low_shot_seeds(config))
+    )
+
+
+def _nll_examples_per_state(config: Mapping[str, Any]) -> int:
+    return len(config["nll"]["categories"]) * int(
+        config["nll"]["examples_per_category"]
+    )
+
+
+def _nll_score_total(config: Mapping[str, Any]) -> int:
+    return len(config["states"]) * _nll_examples_per_state(config)
+
+
+def _low_shot_test_examples(config: Mapping[str, Any]) -> int:
+    return len(_low_shot_categories(config)) * int(
+        config["low_shot"]["test_examples_per_class"]
+    )
+
+
+def _cohort_report_metadata(config: Mapping[str, Any]) -> Dict[str, Any]:
+    value = {
+        "threads": _nll_examples_per_state(config),
+        "categories": len(config["nll"]["categories"]),
+        "threads_per_category": config["nll"]["examples_per_category"],
+    }
+    if config["schema_version"] == CONFIG_SCHEMA_V1:
+        value["fresh_against_prior_splits"] = True
+    else:
+        value.update(
+            {
+                "novelty_definition": "not_used_in_any_prior_test_partition",
+                "prior_split_exclusion": _prior_split_exclusion(config),
+            }
+        )
+    return value
 
 
 def first_post_target_mask(
@@ -868,7 +974,7 @@ def initialize_diagnostics(config_path: Path) -> tuple[Dict[str, Any], Path]:
     }
     diagnostic_id = sha256_bytes(canonical_json_bytes(identity))[:20]
     resolved = {
-        "schema_version": RESOLVED_SCHEMA,
+        "schema_version": _resolved_schema(config),
         "diagnostic_id": diagnostic_id,
         **identity,
         "low_shot": dict(config["low_shot"]),
@@ -923,7 +1029,7 @@ def _validate_resolved_diagnostics(
     }
     if (
         set(resolved) != required
-        or resolved.get("schema_version") != RESOLVED_SCHEMA
+        or resolved.get("schema_version") != _resolved_schema(config)
         or not _ID20_RE.fullmatch(str(resolved.get("diagnostic_id", "")))
         or output.name != resolved.get("diagnostic_id")
         or resolved.get("low_shot") != config["low_shot"]
@@ -975,6 +1081,12 @@ def _validate_resolved_diagnostics(
 def _excluded_title_groups(config: Mapping[str, Any], dataset_path: Path) -> set[str]:
     import pyarrow.parquet as pq
 
+    policy = _prior_split_exclusion(config)
+    selected_partitions = (
+        ("train", "validation", "test")
+        if policy == "all_partitions"
+        else ("test",)
+    )
     excluded_ids: set[str] = set()
     for split in config["splits"]:
         path = _safe_join(_classification_root(config), split["relative_path"], "diagnostics split")
@@ -987,6 +1099,8 @@ def _excluded_title_groups(config: Mapping[str, Any], dataset_path: Path) -> set
         for values in sample_ids.values():
             if not isinstance(values, list):
                 raise RuntimeError("diagnostics split sample IDs are invalid")
+        for partition in selected_partitions:
+            values = sample_ids[partition]
             excluded_ids.update(values)
     found_ids: set[str] = set()
     groups: set[str] = set()
@@ -1051,9 +1165,9 @@ def _target_counts_for_texts(
     return counts
 
 
-def _expected_cohort_rows(
+def _cohort_eligible_rows(
     config: Mapping[str, Any], dataset_path: Path
-) -> tuple[list[Dict[str, Any]], Dict[str, Any]]:
+) -> tuple[Dict[int, list[Dict[str, Any]]], Dict[str, Any]]:
     import pyarrow.parquet as pq
 
     excluded_groups = _excluded_title_groups(config, dataset_path)
@@ -1086,6 +1200,12 @@ def _expected_cohort_rows(
         for group_id, value in representatives.items()
         if len(group_labels[group_id]) == 1
     ]
+    candidate_counts = {
+        str(category): sum(
+            int(value["category_id"]) == category for value in candidates
+        )
+        for category in CATEGORIES
+    }
     tokenizer = _load_nll_tokenizer(config)
     eligible: Dict[int, list[Dict[str, Any]]] = defaultdict(list)
     for start in range(0, len(candidates), 256):
@@ -1109,16 +1229,37 @@ def _expected_cohort_rows(
             ).hexdigest()
             eligible[category].append(ranked)
 
+    eligible_counts = {
+        str(category): len(eligible[category]) for category in CATEGORIES
+    }
+    return eligible, {
+        "prior_split_exclusion": _prior_split_exclusion(config),
+        "excluded_prior_title_groups": len(excluded_groups),
+        "after_prior_split_exclusion_and_deduplication": candidate_counts,
+        "after_minimum_target_tokens": eligible_counts,
+        "tokenizer_fingerprint_sha256": tokenizer_fingerprint(tokenizer),
+    }
+
+
+def _expected_cohort_rows(
+    config: Mapping[str, Any], dataset_path: Path
+) -> tuple[list[Dict[str, Any]], Dict[str, Any]]:
+    eligible, metadata = _cohort_eligible_rows(config, dataset_path)
+
     selected = []
-    eligible_counts = {}
     expected_per_category = config["nll"]["examples_per_category"]
+    insufficient = {
+        str(category): len(eligible[category])
+        for category in CATEGORIES
+        if len(eligible[category]) < expected_per_category
+    }
+    if insufficient:
+        raise RuntimeError(
+            "diagnostics NLL capacity is insufficient: "
+            + json.dumps(insufficient, sort_keys=True)
+        )
     for category in CATEGORIES:
         values = sorted(eligible[category], key=lambda value: value["selection_hash"])
-        eligible_counts[str(category)] = len(values)
-        if len(values) < expected_per_category:
-            raise RuntimeError(
-                f"diagnostics NLL category {category} has insufficient eligible examples"
-            )
         for rank, value in enumerate(values[:expected_per_category]):
             selected.append(
                 {
@@ -1130,11 +1271,156 @@ def _expected_cohort_rows(
                 }
             )
     selected.sort(key=lambda value: (value["category_id"], value["selection_rank"]))
-    return selected, {
-        "excluded_prior_title_groups": len(excluded_groups),
-        "eligible_per_category": eligible_counts,
-        "tokenizer_fingerprint_sha256": tokenizer_fingerprint(tokenizer),
+    return selected, metadata
+
+
+def _capacity_payload(
+    config: Mapping[str, Any],
+    resolved: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+) -> Dict[str, Any]:
+    required = int(config["nll"]["examples_per_category"])
+    eligible = dict(metadata["after_minimum_target_tokens"])
+    sufficient = all(
+        eligible.get(str(category), -1) >= required for category in CATEGORIES
+    )
+    value = {
+        "schema_version": COHORT_CAPACITY_SCHEMA,
+        "diagnostic_id": resolved["diagnostic_id"],
+        "config_sha256": resolved["config_sha256"],
+        "classification_dataset_id": resolved["classification_dataset_id"],
+        "dataset_manifest_sha256": resolved["dataset_manifest_sha256"],
+        "split_manifests_sha256": sha256_bytes(
+            canonical_json_bytes(resolved["splits"])
+        ),
+        "prior_split_exclusion": metadata["prior_split_exclusion"],
+        "categories": list(CATEGORIES),
+        "required_per_category": required,
+        "expected_examples": _nll_examples_per_state(config),
+        "excluded_prior_title_groups": metadata[
+            "excluded_prior_title_groups"
+        ],
+        "after_prior_split_exclusion_and_deduplication": dict(
+            metadata["after_prior_split_exclusion_and_deduplication"]
+        ),
+        "after_minimum_target_tokens": eligible,
+        "minimum_target_tokens": int(config["nll"]["minimum_target_tokens"]),
+        "tokenizer_fingerprint_sha256": metadata[
+            "tokenizer_fingerprint_sha256"
+        ],
+        "redistribution_status": REDISTRIBUTION_STATUS,
+        "status": "sufficient" if sufficient else "insufficient",
     }
+    assert_safe_metadata(value)
+    return value
+
+
+def _validate_capacity_report(
+    config: Mapping[str, Any],
+    resolved: Mapping[str, Any],
+    value: Mapping[str, Any],
+) -> None:
+    expected_keys = {
+        "schema_version",
+        "diagnostic_id",
+        "config_sha256",
+        "classification_dataset_id",
+        "dataset_manifest_sha256",
+        "split_manifests_sha256",
+        "prior_split_exclusion",
+        "categories",
+        "required_per_category",
+        "expected_examples",
+        "excluded_prior_title_groups",
+        "after_prior_split_exclusion_and_deduplication",
+        "after_minimum_target_tokens",
+        "minimum_target_tokens",
+        "tokenizer_fingerprint_sha256",
+        "redistribution_status",
+        "status",
+    }
+    category_keys = {str(category) for category in CATEGORIES}
+    before = value.get("after_prior_split_exclusion_and_deduplication")
+    after = value.get("after_minimum_target_tokens")
+    required = int(config["nll"]["examples_per_category"])
+    if (
+        set(value) != expected_keys
+        or value.get("schema_version") != COHORT_CAPACITY_SCHEMA
+        or value.get("diagnostic_id") != resolved["diagnostic_id"]
+        or value.get("config_sha256") != resolved["config_sha256"]
+        or value.get("classification_dataset_id")
+        != resolved["classification_dataset_id"]
+        or value.get("dataset_manifest_sha256")
+        != resolved["dataset_manifest_sha256"]
+        or value.get("split_manifests_sha256")
+        != sha256_bytes(canonical_json_bytes(resolved["splits"]))
+        or value.get("prior_split_exclusion")
+        != _prior_split_exclusion(config)
+        or value.get("categories") != list(CATEGORIES)
+        or value.get("required_per_category") != required
+        or value.get("expected_examples") != _nll_examples_per_state(config)
+        or value.get("minimum_target_tokens")
+        != config["nll"]["minimum_target_tokens"]
+        or not isinstance(value.get("excluded_prior_title_groups"), int)
+        or value["excluded_prior_title_groups"] < 0
+        or not isinstance(before, Mapping)
+        or not isinstance(after, Mapping)
+        or set(before) != category_keys
+        or set(after) != category_keys
+        or any(
+            not isinstance(count, int)
+            or isinstance(count, bool)
+            or count < 0
+            for count in [*before.values(), *after.values()]
+        )
+        or any(after[key] > before[key] for key in category_keys)
+        or value.get("redistribution_status") != REDISTRIBUTION_STATUS
+    ):
+        raise RuntimeError("diagnostics cohort capacity report is invalid")
+    _sha256_runtime(
+        value.get("tokenizer_fingerprint_sha256"),
+        "diagnostics cohort tokenizer fingerprint",
+    )
+    expected_status = (
+        "sufficient"
+        if all(after[str(category)] >= required for category in CATEGORIES)
+        else "insufficient"
+    )
+    if value.get("status") != expected_status:
+        raise RuntimeError("diagnostics cohort capacity status changed")
+    assert_safe_metadata(value)
+
+
+def audit_cohort(config_path: Path) -> Dict[str, Any]:
+    config, _ = load_diagnostics_config(config_path)
+    resolved, output = initialize_diagnostics(config_path)
+    target = output / "cohort_capacity.json"
+    if target.is_file():
+        value = read_json(target, "diagnostics cohort capacity")
+        _validate_capacity_report(config, resolved, value)
+    else:
+        _, metadata = _cohort_eligible_rows(config, _dataset_path(config))
+        value = _capacity_payload(config, resolved, metadata)
+        write_json_atomic(target, value)
+        target.chmod(0o600)
+    if value["status"] != "sufficient":
+        raise RuntimeError(
+            "diagnostics NLL capacity is insufficient: "
+            + json.dumps(value["after_minimum_target_tokens"], sort_keys=True)
+        )
+    return dict(value)
+
+
+def _require_capacity_audit(
+    config: Mapping[str, Any], resolved: Mapping[str, Any], output: Path
+) -> Dict[str, Any]:
+    value = read_json(
+        output / "cohort_capacity.json", "diagnostics cohort capacity"
+    )
+    _validate_capacity_report(config, resolved, value)
+    if value["status"] != "sufficient":
+        raise RuntimeError("diagnostics cohort capacity is insufficient")
+    return dict(value)
 
 
 def prepare_cohort(config_path: Path) -> Dict[str, Any]:
@@ -1143,11 +1429,14 @@ def prepare_cohort(config_path: Path) -> Dict[str, Any]:
 
     config, _ = load_diagnostics_config(config_path)
     resolved, output = initialize_diagnostics(config_path)
+    capacity = _require_capacity_audit(config, resolved, output)
     target = output / "cohort_manifest.json"
     if target.is_file():
         return validate_cohort(config_path)
     dataset_path = _dataset_path(config)
     selected, selection_metadata = _expected_cohort_rows(config, dataset_path)
+    if _capacity_payload(config, resolved, selection_metadata) != capacity:
+        raise RuntimeError("diagnostics cohort capacity changed after audit")
     selection_seed = config["nll"]["selection_seed"]
     expected_per_category = config["nll"]["examples_per_category"]
     private_root = _output_subdirectory(output, "private", "diagnostics private output")
@@ -1170,7 +1459,7 @@ def prepare_cohort(config_path: Path) -> Dict[str, Any]:
     ids = [value["sample_id"] for value in selected]
     groups = [value["title_group_id"] for value in selected]
     manifest = {
-        "schema_version": COHORT_SCHEMA,
+        "schema_version": _cohort_schema(config),
         "diagnostic_id": resolved["diagnostic_id"],
         "classification_dataset_id": resolved["classification_dataset_id"],
         "selection": config["nll"]["selection"],
@@ -1182,7 +1471,9 @@ def prepare_cohort(config_path: Path) -> Dict[str, Any]:
         "excluded_prior_title_groups": selection_metadata[
             "excluded_prior_title_groups"
         ],
-        "eligible_per_category": selection_metadata["eligible_per_category"],
+        "eligible_per_category": selection_metadata[
+            "after_minimum_target_tokens"
+        ],
         "cohort_ids_sha256": digest_strings(ids),
         "cohort_title_groups_sha256": digest_strings(groups),
         "tokenizer_fingerprint_sha256": selection_metadata[
@@ -1198,6 +1489,20 @@ def prepare_cohort(config_path: Path) -> Dict[str, Any]:
         "redistribution_status": REDISTRIBUTION_STATUS,
         "status": "complete",
     }
+    if config["schema_version"] == CONFIG_SCHEMA_V2:
+        manifest.update(
+            {
+                "prior_split_exclusion": selection_metadata[
+                    "prior_split_exclusion"
+                ],
+                "after_prior_split_exclusion_and_deduplication": selection_metadata[
+                    "after_prior_split_exclusion_and_deduplication"
+                ],
+                "capacity_report_sha256": file_sha256(
+                    output / "cohort_capacity.json"
+                ),
+            }
+        )
     assert_safe_metadata(manifest)
     write_json_atomic(target, manifest)
     target.chmod(0o600)
@@ -1228,17 +1533,18 @@ def _load_cohort(output: Path) -> tuple[Dict[str, Any], Any]:
 def validate_cohort(config_path: Path) -> Dict[str, Any]:
     config, _ = load_diagnostics_config(config_path)
     resolved, output = locate_diagnostics(config_path)
+    capacity = _require_capacity_audit(config, resolved, output)
     dataset_path = _dataset_path(config)
     validate_classification_dataset(dataset_path)
     manifest, table = _load_cohort(output)
     expected_columns = ["sample_id", "title_group_id", "category_id", "target_tokens", "selection_rank"]
     if (
-        manifest.get("schema_version") != COHORT_SCHEMA
+        manifest.get("schema_version") != _cohort_schema(config)
         or manifest.get("diagnostic_id") != resolved["diagnostic_id"]
         or manifest.get("classification_dataset_id") != resolved["classification_dataset_id"]
         or manifest.get("status") != "complete"
         or table.column_names != expected_columns
-        or table.num_rows != 1800
+        or table.num_rows != _nll_examples_per_state(config)
     ):
         raise RuntimeError("diagnostics cohort is invalid")
     values = table.to_pydict()
@@ -1247,26 +1553,50 @@ def validate_cohort(config_path: Path) -> Dict[str, Any]:
     categories = [int(value) for value in values["category_id"]]
     target_tokens = [int(value) for value in values["target_tokens"]]
     if (
-        len(set(ids)) != 1800
-        or len(set(groups)) != 1800
+        len(set(ids)) != _nll_examples_per_state(config)
+        or len(set(groups)) != _nll_examples_per_state(config)
         or digest_strings(ids) != manifest.get("cohort_ids_sha256")
         or digest_strings(groups) != manifest.get("cohort_title_groups_sha256")
-        or any(categories.count(category) != 300 for category in CATEGORIES)
+        or any(
+            categories.count(category)
+            != config["nll"]["examples_per_category"]
+            for category in CATEGORIES
+        )
         or any(value < config["nll"]["minimum_target_tokens"] for value in target_tokens)
     ):
         raise RuntimeError("diagnostics cohort balance or identity changed")
     expected_rows, selection_metadata = _expected_cohort_rows(config, dataset_path)
     if table.to_pylist() != expected_rows:
         raise RuntimeError("diagnostics cohort deterministic selection changed")
-    if any(
-        manifest.get(key) != selection_metadata[key]
-        for key in (
-            "excluded_prior_title_groups",
-            "eligible_per_category",
-            "tokenizer_fingerprint_sha256",
+    expected_metadata = {
+        "excluded_prior_title_groups": selection_metadata[
+            "excluded_prior_title_groups"
+        ],
+        "eligible_per_category": selection_metadata[
+            "after_minimum_target_tokens"
+        ],
+        "tokenizer_fingerprint_sha256": selection_metadata[
+            "tokenizer_fingerprint_sha256"
+        ],
+    }
+    if config["schema_version"] == CONFIG_SCHEMA_V2:
+        expected_metadata.update(
+            {
+                "prior_split_exclusion": selection_metadata[
+                    "prior_split_exclusion"
+                ],
+                "after_prior_split_exclusion_and_deduplication": selection_metadata[
+                    "after_prior_split_exclusion_and_deduplication"
+                ],
+                "capacity_report_sha256": file_sha256(
+                    output / "cohort_capacity.json"
+                ),
+            }
         )
-    ):
+    if any(manifest.get(key) != value for key, value in expected_metadata.items()):
         raise RuntimeError("diagnostics cohort selection metadata changed")
+    if _capacity_payload(config, resolved, selection_metadata) != capacity:
+        raise RuntimeError("diagnostics cohort capacity changed during validation")
     result = {
         "diagnostic_id": resolved["diagnostic_id"],
         "examples": table.num_rows,
@@ -1374,10 +1704,17 @@ def run_low_shot_unit(config_path: Path, unit_index: int) -> Dict[str, Any]:
     if set(train_labels) != set(label_values) or set(test_labels) != set(label_values):
         raise RuntimeError("low-shot split has absent classes")
     for label in label_values:
-        if train_labels.count(label) != 1400 or test_labels.count(label) != 300:
+        if (
+            train_labels.count(label) != max(config["low_shot"]["budgets_per_class"])
+            or test_labels.count(label)
+            != config["low_shot"]["test_examples_per_class"]
+        ):
             raise RuntimeError("low-shot split class balance changed")
-    selected = nested_low_shot_ids(train_ids, train_labels, seed=seed)
-    maximum_ids = selected[max(LOW_SHOT_BUDGETS)]
+    budgets = _low_shot_budgets(config)
+    selected = nested_low_shot_ids(
+        train_ids, train_labels, seed=seed, budgets=budgets
+    )
+    maximum_ids = selected[max(budgets)]
     label_by_id = dict(zip(train_ids + test_ids, train_labels + test_labels))
     selection_records = [
         {
@@ -1385,7 +1722,7 @@ def run_low_shot_unit(config_path: Path, unit_index: int) -> Dict[str, Any]:
             "examples": len(selected[budget]),
             "selection_sha256": digest_strings(selected[budget]),
         }
-        for budget in LOW_SHOT_BUDGETS
+        for budget in budgets
     ]
     test_set_sha256 = digest_strings(test_ids)
     if target.is_file():
@@ -1413,7 +1750,7 @@ def run_low_shot_unit(config_path: Path, unit_index: int) -> Dict[str, Any]:
         )
         position = {sample_id: index for index, sample_id in enumerate(all_ids)}
         test_matrix = embeddings[len(maximum_ids) :]
-        for budget in LOW_SHOT_BUDGETS:
+        for budget in budgets:
             budget_ids = selected[budget]
             train_matrix = np.stack([embeddings[position[sample_id]] for sample_id in budget_ids]).astype(np.float32)
             budget_labels = [label_by_id[sample_id] for sample_id in budget_ids]
@@ -1456,7 +1793,9 @@ def run_low_shot_unit(config_path: Path, unit_index: int) -> Dict[str, Any]:
         "counts": {
             "validation_accessed": 0,
             "test_examples": len(test_ids),
-            "test_examples_per_class": 300,
+            "test_examples_per_class": config["low_shot"][
+                "test_examples_per_class"
+            ],
             "fits": len(results),
         },
         "test_set_sha256": test_set_sha256,
@@ -1485,8 +1824,14 @@ def _validate_low_shot_unit(
     expected_selection: Sequence[Mapping[str, Any]] | None = None,
     expected_test_set_sha256: str | None = None,
 ) -> None:
+    low_shot = resolved["low_shot"]
+    categories = _low_shot_categories(resolved)
+    budgets = _low_shot_budgets(resolved)
+    test_examples = _low_shot_test_examples(resolved)
+    fits = len(MODEL_NAMES) * len(budgets)
+    private_rows_expected = test_examples * fits
     expected_pairs = {
-        (model, budget) for model in MODEL_NAMES for budget in LOW_SHOT_BUDGETS
+        (model, budget) for model in MODEL_NAMES for budget in budgets
     }
     results = value.get("results")
     selection = value.get("selection")
@@ -1507,13 +1852,15 @@ def _validate_low_shot_unit(
         != expected_pairs
         or not isinstance(selection, list)
         or [item.get("budget_per_class") for item in selection]
-        != list(LOW_SHOT_BUDGETS)
+        != list(budgets)
         or counts
         != {
             "validation_accessed": 0,
-            "test_examples": 1800,
-            "test_examples_per_class": 300,
-            "fits": 12,
+            "test_examples": test_examples,
+            "test_examples_per_class": low_shot[
+                "test_examples_per_class"
+            ],
+            "fits": fits,
         }
     ):
         raise RuntimeError("low-shot unit matrix is invalid")
@@ -1530,24 +1877,25 @@ def _validate_low_shot_unit(
         raise RuntimeError("low-shot fixed test set changed")
     for item in selection:
         budget = item["budget_per_class"]
-        if item.get("examples") != budget * len(CATEGORIES):
+        if item.get("examples") != budget * len(categories):
             raise RuntimeError("low-shot selection count is invalid")
         _sha256_runtime(item.get("selection_sha256"), "low-shot selection digest")
-    expected_labels = {str(category) for category in CATEGORIES}
+    expected_labels = {str(category) for category in categories}
     for result in results:
         if (
             not math.isfinite(float(result.get("accuracy", math.nan)))
             or not math.isfinite(float(result.get("macro_f1", math.nan)))
-            or result.get("labels") != [str(category) for category in CATEGORIES]
+            or result.get("labels") != [str(category) for category in categories]
             or set(result.get("by_class", {})) != expected_labels
-            or len(result.get("confusion_matrix", [])) != len(CATEGORIES)
-            or any(len(row) != len(CATEGORIES) for row in result["confusion_matrix"])
+            or len(result.get("confusion_matrix", [])) != len(categories)
+            or any(len(row) != len(categories) for row in result["confusion_matrix"])
         ):
             raise RuntimeError("low-shot unit metrics are invalid")
         for metrics in result["by_class"].values():
             if (
                 set(metrics) != {"precision", "recall", "f1", "support"}
-                or metrics["support"] != 300
+                or metrics["support"]
+                != low_shot["test_examples_per_class"]
                 or not all(
                     math.isfinite(float(metrics[key]))
                     for key in ("precision", "recall", "f1")
@@ -1559,7 +1907,7 @@ def _validate_low_shot_unit(
         output, private.get("relative_path"), "low-shot private output"
     )
     if (
-        private.get("rows") != 21_600
+        private.get("rows") != private_rows_expected
         or private_path.is_symlink()
         or not private_path.is_file()
         or private_path.stat().st_size != private.get("size_bytes")
@@ -1577,7 +1925,10 @@ def _validate_low_shot_unit(
         "seed",
         "budget_per_class",
     ]
-    if table.column_names != expected_columns or table.num_rows != 21_600:
+    if (
+        table.column_names != expected_columns
+        or table.num_rows != private_rows_expected
+    ):
         raise RuntimeError("low-shot private prediction schema is invalid")
     rows = table.to_pylist()
     result_lookup = {
@@ -1585,7 +1936,7 @@ def _validate_low_shot_unit(
     }
     reference_ids = None
     reference_truth = None
-    labels = [str(category) for category in CATEGORIES]
+    labels = [str(category) for category in categories]
     for model, budget in sorted(expected_pairs, key=lambda pair: (pair[0], pair[1])):
         matching = [
             row
@@ -1596,8 +1947,8 @@ def _validate_low_shot_unit(
         truth = [row["true_label"] for row in matching]
         predicted = [row["predicted_label"] for row in matching]
         if (
-            len(matching) != 1800
-            or len(set(ids)) != 1800
+            len(matching) != test_examples
+            or len(set(ids)) != test_examples
             or any(row["seed"] != seed for row in matching)
             or digest_strings(ids) != value["test_set_sha256"]
             or set(truth) != set(labels)
@@ -1624,7 +1975,8 @@ def _load_low_shot_units(
     )
     dataset_path = _dataset_path(config)
     values = []
-    for index, seed in enumerate(SEEDS):
+    budgets = _low_shot_budgets(config)
+    for index, seed in enumerate(_low_shot_seeds(config)):
         path = _private_artifact_path(
             output,
             f"low_shot/units/seed-{seed}.json",
@@ -1634,14 +1986,16 @@ def _load_low_shot_units(
         split = load_pinned_split(source_config, source_resolved, "coarse", seed)
         train_ids = list(split["sample_ids"]["train"])
         train_labels = load_private_labels(dataset_path, train_ids, "coarse")
-        selected = nested_low_shot_ids(train_ids, train_labels, seed=seed)
+        selected = nested_low_shot_ids(
+            train_ids, train_labels, seed=seed, budgets=budgets
+        )
         expected_selection = [
             {
                 "budget_per_class": budget,
                 "examples": len(selected[budget]),
                 "selection_sha256": digest_strings(selected[budget]),
             }
-            for budget in LOW_SHOT_BUDGETS
+            for budget in budgets
         ]
         _validate_low_shot_unit(
             value,
@@ -1662,8 +2016,8 @@ def _require_cohort_validation(resolved: Mapping[str, Any], output: Path) -> Non
     value = read_json(output / "cohort_validation.json", "diagnostics cohort validation")
     if (
         value.get("diagnostic_id") != resolved["diagnostic_id"]
-        or value.get("examples") != 1800
-        or value.get("categories") != 6
+        or value.get("examples") != _nll_examples_per_state(resolved)
+        or value.get("categories") != len(resolved["nll"]["categories"])
         or value.get("cohort_manifest_sha256") != file_sha256(output / "cohort_manifest.json")
         or value.get("status") != "valid"
     ):
@@ -2145,7 +2499,7 @@ def _load_state_scores(
         )
         or manifest.get("cohort_manifest_sha256")
         != file_sha256(output / "cohort_manifest.json")
-        or manifest.get("examples") != 1800
+        or manifest.get("examples") != _nll_examples_per_state(resolved)
         or manifest.get("status") != "complete"
     ):
         raise RuntimeError("diagnostics score manifest is invalid")
@@ -2211,12 +2565,16 @@ def _load_state_scores(
         for key in combined:
             combined[key].extend(values[key])
         expected_start += metadata["count"]
-    if expected_start != 1800 or digest_strings(combined["sample_id"]) != manifest.get("cohort_ids_sha256"):
+    if (
+        expected_start != _nll_examples_per_state(resolved)
+        or digest_strings(combined["sample_id"])
+        != manifest.get("cohort_ids_sha256")
+    ):
         raise RuntimeError("diagnostics score coverage is incomplete")
     for count, nll_sum, mean_nll in zip(combined["target_tokens"], combined["nll_sum"], combined["mean_nll"]):
         if (
             not isinstance(count, int)
-            or count < 32
+            or count < resolved["nll"]["minimum_target_tokens"]
             or not math.isfinite(float(nll_sum))
             or not math.isfinite(float(mean_nll))
             or not math.isclose(float(nll_sum) / count, float(mean_nll), rel_tol=1e-6, abs_tol=1e-7)
@@ -2258,8 +2616,8 @@ def validate_scores(config_path: Path) -> Dict[str, Any]:
     value = {
         "schema_version": SCORE_VALIDATION_SCHEMA,
         "diagnostic_id": resolved["diagnostic_id"],
-        "states": 9,
-        "examples_per_state": 1800,
+        "states": len(config["states"]),
+        "examples_per_state": _nll_examples_per_state(config),
         "scores": total,
         "score_manifests": manifests,
         "status": "valid",
@@ -2275,9 +2633,10 @@ def _require_scores_validation(resolved: Mapping[str, Any], output: Path) -> Non
     if (
         value.get("schema_version") != SCORE_VALIDATION_SCHEMA
         or value.get("diagnostic_id") != resolved["diagnostic_id"]
-        or value.get("states") != 9
-        or value.get("examples_per_state") != 1800
-        or value.get("scores") != 16_200
+        or value.get("states") != len(resolved["states"])
+        or value.get("examples_per_state")
+        != _nll_examples_per_state(resolved)
+        or value.get("scores") != _nll_score_total(resolved)
         or value.get("status") != "valid"
     ):
         raise RuntimeError("diagnostics scores have not been validated")
@@ -2314,18 +2673,33 @@ def _bootstrap_state_means(
 
     category_array = np.asarray(categories, dtype=np.int32)
     values = np.asarray(matrix, dtype=np.float64)
-    if values.shape != (1800, 9) or not np.isfinite(values).all():
+    if (
+        values.ndim != 2
+        or values.shape[0] != len(category_array)
+        or values.shape[1] != len(STATE_NAMES)
+        or not np.isfinite(values).all()
+    ):
         raise RuntimeError("diagnostics bootstrap matrix is invalid")
+    if len(category_array) % len(CATEGORIES):
+        raise RuntimeError("diagnostics bootstrap categories are unbalanced")
+    examples_per_category = len(category_array) // len(CATEGORIES)
     result = np.zeros((repetitions, values.shape[1]), dtype=np.float64)
     generator = np.random.default_rng(seed)
     block_size = 500
     for category in CATEGORIES:
         category_values = values[category_array == category]
-        if category_values.shape != (300, 9):
+        if category_values.shape != (
+            examples_per_category,
+            len(STATE_NAMES),
+        ):
             raise RuntimeError("diagnostics bootstrap categories are unbalanced")
         for start in range(0, repetitions, block_size):
             stop = min(start + block_size, repetitions)
-            indices = generator.integers(0, 300, size=(stop - start, 300))
+            indices = generator.integers(
+                0,
+                examples_per_category,
+                size=(stop - start, examples_per_category),
+            )
             result[start:stop] += category_values[indices].mean(axis=1) / len(CATEGORIES)
     return result
 
@@ -2368,6 +2742,8 @@ def _build_report_payload(
 ) -> tuple[Dict[str, Any], Dict[str, list[Dict[str, Any]]]]:
     import numpy as np
 
+    low_shot_budgets = _low_shot_budgets(config)
+    low_shot_seeds = _low_shot_seeds(config)
     low_units = _load_low_shot_units(config, resolved, output)
     low_metrics = []
     low_class_metrics = []
@@ -2391,10 +2767,10 @@ def _build_report_payload(
                         **values,
                     }
                 )
-    if len(low_metrics) != 60:
+    if len(low_metrics) != _low_shot_fits(config):
         raise RuntimeError("diagnostics low-shot result matrix is incomplete")
     low_summary = []
-    for budget in LOW_SHOT_BUDGETS:
+    for budget in low_shot_budgets:
         for model in MODEL_NAMES:
             matching = [
                 value
@@ -2421,7 +2797,7 @@ def _build_report_payload(
         ("total_practical_gain", "base", "forum"),
     )
     low_contrasts = []
-    for budget in LOW_SHOT_BUDGETS:
+    for budget in low_shot_budgets:
         for metric in ("accuracy", "macro_f1"):
             for name, first, second in contrast_specs:
                 first_values = {
@@ -2434,9 +2810,15 @@ def _build_report_payload(
                     for value in low_metrics
                     if value["budget_per_class"] == budget and value["model"] == second
                 }
-                if set(first_values) != set(SEEDS) or set(second_values) != set(SEEDS):
+                if (
+                    set(first_values) != set(low_shot_seeds)
+                    or set(second_values) != set(low_shot_seeds)
+                ):
                     raise RuntimeError("diagnostics low-shot pairing is incomplete")
-                deltas = [second_values[seed] - first_values[seed] for seed in SEEDS]
+                deltas = [
+                    second_values[seed] - first_values[seed]
+                    for seed in low_shot_seeds
+                ]
                 low_contrasts.append(
                     {
                         "budget_per_class": budget,
@@ -2447,7 +2829,7 @@ def _build_report_payload(
                         "direction": "second_minus_first",
                         "values_by_seed": [
                             {"seed": seed, "delta": delta}
-                            for seed, delta in zip(SEEDS, deltas)
+                            for seed, delta in zip(low_shot_seeds, deltas)
                         ],
                         **_student_summary(deltas),
                         "endpoint": (
@@ -2501,7 +2883,7 @@ def _build_report_payload(
                     "arm": state["arm"],
                     "optimizer_step": state["optimizer_step"],
                     "category_id": category,
-                    "threads": 300,
+                    "threads": config["nll"]["examples_per_category"],
                     "mean_thread_nll": mean,
                     "perplexity": _perplexity(mean),
                 }
@@ -2516,7 +2898,7 @@ def _build_report_payload(
                 "arm": state["arm"],
                 "optimizer_step": state["optimizer_step"],
                 "training_tokens": state["training_tokens"],
-                "threads": 1800,
+                "threads": _nll_examples_per_state(config),
                 "target_tokens": int(target_tokens.sum()),
                 "macro_mean_thread_nll": macro_nll,
                 "confidence_interval_95": _percentile_interval(bootstraps[:, index]),
@@ -2617,8 +2999,9 @@ def _build_report_payload(
                 decision = terminal_checkpoint_decision(interval)
                 terminal_decisions.append({**record, "decision": decision})
 
+    cohort_report = _cohort_report_metadata(config)
     report = {
-        "schema_version": REPORT_SCHEMA,
+        "schema_version": _report_schema(config),
         "diagnostic_id": resolved["diagnostic_id"],
         "identity": {
             "git_commit": resolved["git_commit"],
@@ -2638,12 +3021,7 @@ def _build_report_payload(
             "class_metrics": low_class_metrics,
         },
         "conditional_nll": {
-            "cohort": {
-                "threads": 1800,
-                "categories": 6,
-                "threads_per_category": 300,
-                "fresh_against_prior_splits": True,
-            },
+            "cohort": cohort_report,
             "state_summary": [state_summary[index] for index in (0, 4, 8)],
             "paired_contrasts": nll_contrasts,
             "by_category": [
@@ -2737,8 +3115,8 @@ def build_report(config_path: Path) -> Dict[str, Any]:
     (report_root / "report_files.json").chmod(0o600)
     return {
         "diagnostic_id": resolved["diagnostic_id"],
-        "low_shot_fits": 60,
-        "nll_scores": 16_200,
+        "low_shot_fits": _low_shot_fits(config),
+        "nll_scores": _nll_score_total(config),
         "report_sha256": report["report_sha256"],
         "status": "complete",
     }
@@ -2779,8 +3157,8 @@ def validate_diagnostics_report(config_path: Path) -> Dict[str, Any]:
             raise RuntimeError("diagnostics report file changed")
     return {
         "diagnostic_id": resolved["diagnostic_id"],
-        "low_shot_fits": 60,
-        "nll_scores": 16_200,
+        "low_shot_fits": _low_shot_fits(config),
+        "nll_scores": _nll_score_total(config),
         "report_sha256": expected["report_sha256"],
         "status": "valid",
     }
@@ -2791,6 +3169,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "command",
         choices=(
+            "audit-cohort",
             "prepare-cohort",
             "validate-cohort",
             "preflight",
@@ -2818,7 +3197,9 @@ def main() -> None:
             raise SystemExit(f"{args.command} requires --unit-index")
     elif args.unit_index is not None:
         raise SystemExit("--unit-index is only valid for unit commands")
-    if args.command == "prepare-cohort":
+    if args.command == "audit-cohort":
+        result = audit_cohort(args.config)
+    elif args.command == "prepare-cohort":
         result = prepare_cohort(args.config)
     elif args.command == "validate-cohort":
         result = validate_cohort(args.config)

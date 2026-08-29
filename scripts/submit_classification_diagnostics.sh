@@ -18,7 +18,7 @@ CPU_PARTITION="${CLASSIFICATION_DIAGNOSTICS_CPU_PARTITION:-${CLASSIFICATION_CPU_
 GPU_PARTITION="${CLASSIFICATION_DIAGNOSTICS_GPU_PARTITION:-${CLASSIFICATION_GPU_PARTITION:-l40s}}"
 
 case "${MODE}" in
-  prepare-cohort|validate-cohort|validate-scores|report|validate-report)
+  audit-cohort|prepare-cohort|validate-cohort|validate-scores|report|validate-report)
     sbatch "${COMMON[@]}" \
       --partition="${CPU_PARTITION}" \
       --cpus-per-task=16 \
@@ -59,7 +59,7 @@ case "${MODE}" in
       "${PROJECT_DIR}/scripts/classification_diagnostics_gpu.sbatch" "${MODE}"
     ;;
   *)
-    echo "Uso: $0 {prepare-cohort|validate-cohort|preflight|low-shot-unit|score-unit|validate-scores|report|validate-report}" >&2
+    echo "Uso: $0 {audit-cohort|prepare-cohort|validate-cohort|preflight|low-shot-unit|score-unit|validate-scores|report|validate-report}" >&2
     exit 2
     ;;
 esac

@@ -2,7 +2,7 @@
 
 Este pipeline é separado da avaliação pareada concluída
 `5e9cb26cc8b35bc1b33e` e não altera seus arquivos. O contrato executável está
-em `configs/classification/diagnostics-v1.json` e fixa a avaliação-fonte, os
+em `configs/classification/diagnostics-v2.json` e fixa a avaliação-fonte, os
 embeddings existentes, o dataset, os dez splits, os três modelos finais, os
 dois runs e os seis checkpoints intermediários.
 
@@ -14,9 +14,14 @@ São produzidos três diagnósticos:
 - curva de NLL nos passos 0, 13k, 26k, 39k e 52k de cada braço.
 
 O low-shot é exploratório porque reutiliza testes já examinados. A NLL e a
-curva usam uma coorte nova, disjunta por `title_group_id` de todos os dez
-splits anteriores. Os intervalos da NLL são obtidos por bootstrap pareado e
+curva usam uma coorte que exclui qualquer `title_group_id` presente no teste
+de qualquer um dos dez splits anteriores. Grupos vistos somente no treino ou
+na validação do classificador podem entrar porque nenhum backbone é ajustado
+nessa etapa. Os intervalos da NLL são obtidos por bootstrap pareado e
 estratificado por categoria; não são produzidos p-valores.
+
+O contrato v1 permanece versionado para reproduzir a tentativa que excluía
+treino, validação e teste. Ele não é usado pelos launchers atuais.
 
 ## Dados privados e identidade
 
@@ -25,6 +30,7 @@ Os outputs ficam fora do Git em:
 ```text
 $PTBR_CLASSIFICATION_ROOT/diagnostics/<diagnostic-id>/
 ├── resolved_diagnostics.json
+├── cohort_capacity.json
 ├── cohort_manifest.json
 ├── cohort_validation.json
 ├── low_shot/
@@ -60,7 +66,14 @@ Execute **somente um bloco por vez**. Cada job ou array deve terminar
 integralmente com `COMPLETED 0:0` antes de submeter o bloco seguinte; os
 comandos abaixo não criam dependências Slurm automaticamente.
 
-Primeiro, prepare e valide a coorte:
+Primeiro, audite a capacidade com a política v2:
+
+```bash
+CAPACITY_JOB_ID=$(./scripts/submit_classification_diagnostics.sh audit-cohort)
+```
+
+Exija `COMPLETED 0:0`, `"status": "sufficient"` e pelo menos 300 exemplos
+em cada uma das seis categorias. Depois prepare a coorte:
 
 ```bash
 COHORT_JOB_ID=$(./scripts/submit_classification_diagnostics.sh prepare-cohort)

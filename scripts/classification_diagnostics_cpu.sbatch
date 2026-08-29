@@ -15,7 +15,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 MODE="${1:-}"
-CONFIG="configs/classification/diagnostics-v1.json"
+CONFIG="configs/classification/diagnostics-v2.json"
 
 cd "${PROJECT_DIR}"
 source "${HOME}/activate_queroquero.sh"
@@ -44,7 +44,7 @@ echo "Modo: ${MODE}"
 echo "Python: $(python --version)"
 
 case "${MODE}" in
-  prepare-cohort|validate-cohort|validate-scores|report|validate-report)
+  audit-cohort|prepare-cohort|validate-cohort|validate-scores|report|validate-report)
     python -m queroquero.classification_diagnostics "${MODE}" \
       --config "${CONFIG}"
     ;;
@@ -58,7 +58,7 @@ case "${MODE}" in
       --unit-index "${SLURM_ARRAY_TASK_ID}"
     ;;
   *)
-    echo "Uso: $0 {prepare-cohort|validate-cohort|low-shot-unit|validate-scores|report|validate-report}" >&2
+    echo "Uso: $0 {audit-cohort|prepare-cohort|validate-cohort|low-shot-unit|validate-scores|report|validate-report}" >&2
     exit 2
     ;;
 esac

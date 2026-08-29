@@ -1,0 +1,281 @@
+{
+  "schema_version": "queroquero-cpt-diagnostics-config/v2",
+  "source_evaluation": {
+    "evaluation_id": "5e9cb26cc8b35bc1b33e",
+    "git_commit": "81dc65a2ab8ae5266e24f92b1fda1fbacc316b64",
+    "config_sha256": "46d2eb85a3fb7101e2a000f52e3628d87a813d059b46635ff1ba7b64b32e0444",
+    "report_sha256": "cab8be45e4581419686f676d733e691128c538d222ca6f1c92d5cb08528814f0",
+    "relative_path": "evaluations/5e9cb26cc8b35bc1b33e"
+  },
+  "dataset": {
+    "classification_dataset_id": "dc4b2ce164eab81812a2",
+    "relative_path": "adrenaline/dc4b2ce164eab81812a2",
+    "root_env": "PTBR_CLASSIFICATION_ROOT"
+  },
+  "splits": [
+    {
+      "benchmark_id": "78cd03cb7fd30fc12e50",
+      "relative_path": "splits/coarse/seed-42/split_manifest.json",
+      "seed": 42,
+      "task": "coarse"
+    },
+    {
+      "benchmark_id": "7dba0bfa0c295e9097c0",
+      "relative_path": "splits/fine/seed-42/split_manifest.json",
+      "seed": 42,
+      "task": "fine"
+    },
+    {
+      "benchmark_id": "863f4d5b94ff875b4e30",
+      "relative_path": "splits/coarse/seed-43/split_manifest.json",
+      "seed": 43,
+      "task": "coarse"
+    },
+    {
+      "benchmark_id": "e047f1b1c3bf2b6c4737",
+      "relative_path": "splits/fine/seed-43/split_manifest.json",
+      "seed": 43,
+      "task": "fine"
+    },
+    {
+      "benchmark_id": "71f09348e74ede0bf4e7",
+      "relative_path": "splits/coarse/seed-44/split_manifest.json",
+      "seed": 44,
+      "task": "coarse"
+    },
+    {
+      "benchmark_id": "d9161ecc5ffa9280058c",
+      "relative_path": "splits/fine/seed-44/split_manifest.json",
+      "seed": 44,
+      "task": "fine"
+    },
+    {
+      "benchmark_id": "667b9959a18e6dffb84f",
+      "relative_path": "splits/coarse/seed-45/split_manifest.json",
+      "seed": 45,
+      "task": "coarse"
+    },
+    {
+      "benchmark_id": "b4462bc1bbecf3d0ee9d",
+      "relative_path": "splits/fine/seed-45/split_manifest.json",
+      "seed": 45,
+      "task": "fine"
+    },
+    {
+      "benchmark_id": "28c633d843f18bd47dcd",
+      "relative_path": "splits/coarse/seed-46/split_manifest.json",
+      "seed": 46,
+      "task": "coarse"
+    },
+    {
+      "benchmark_id": "092f9915032878ddf706",
+      "relative_path": "splits/fine/seed-46/split_manifest.json",
+      "seed": 46,
+      "task": "fine"
+    }
+  ],
+  "models": {
+    "base": {
+      "model_id": "Polygl0t/Tucano2-0.6B-Base",
+      "revision": "dad97dc864a8f9a1d240fb9351d098f3af9511d7"
+    },
+    "general": {
+      "artifact_id": "c250aad13167ed8efd65",
+      "artifact_sha256": "b694160dff92da42e2d12ce247928e208f3c0385a115ac2db359926e8dd3c540",
+      "expected_arm": "general",
+      "relative_path": "artifacts/c250aad13167ed8efd65",
+      "run_id": "3cfe6f183912c25b859a"
+    },
+    "forum": {
+      "artifact_id": "ae3238fde6675942cac5",
+      "artifact_sha256": "74046c639049eb76c58696127c469a24ecf8f0637b640d64fa9ab2072f269627",
+      "expected_arm": "forum_tech",
+      "relative_path": "artifacts/ae3238fde6675942cac5",
+      "run_id": "5a60a06b1b063f90f86c"
+    }
+  },
+  "training_runs": {
+    "general": {
+      "run_id": "3cfe6f183912c25b859a",
+      "expected_arm": "general",
+      "config_sha256": "1fbb6ff7cf82e86f62e47b5d2f53220d53d671542eea4a6f9064743520e60147",
+      "inputs_sha256": "55dbb9cfd53ad5e6c0da7017efc3a8ee66c917b87f6f772f3343717a6284abe0",
+      "git_commit": "04112aed13753cbef68c60ed448f426a710ca365"
+    },
+    "forum": {
+      "run_id": "5a60a06b1b063f90f86c",
+      "expected_arm": "forum_tech",
+      "config_sha256": "f520aed5024b0668fd1ef3c8e67a891900840280a97d60d02a9d9c97004437b6",
+      "inputs_sha256": "8084ee8a6fc66141ac4dba41c4398c24355266478f422d709a567c64ae4bf931",
+      "git_commit": "04112aed13753cbef68c60ed448f426a710ca365"
+    }
+  },
+  "states": [
+    {
+      "state_index": 0,
+      "state_name": "base-000000",
+      "model": "base",
+      "arm": "base",
+      "kind": "huggingface",
+      "optimizer_step": 0,
+      "training_tokens": 0
+    },
+    {
+      "state_index": 1,
+      "state_name": "general-013000",
+      "model": "general",
+      "arm": "general",
+      "kind": "checkpoint",
+      "relative_path": "checkpoints/3cfe6f183912c25b859a/step-013000",
+      "optimizer_step": 13000,
+      "training_tokens": 106496000
+    },
+    {
+      "state_index": 2,
+      "state_name": "general-026000",
+      "model": "general",
+      "arm": "general",
+      "kind": "checkpoint",
+      "relative_path": "checkpoints/3cfe6f183912c25b859a/step-026000",
+      "optimizer_step": 26000,
+      "training_tokens": 212992000
+    },
+    {
+      "state_index": 3,
+      "state_name": "general-039000",
+      "model": "general",
+      "arm": "general",
+      "kind": "checkpoint",
+      "relative_path": "checkpoints/3cfe6f183912c25b859a/step-039000",
+      "optimizer_step": 39000,
+      "training_tokens": 319488000
+    },
+    {
+      "state_index": 4,
+      "state_name": "general-052000",
+      "model": "general",
+      "arm": "general",
+      "kind": "artifact",
+      "relative_path": "artifacts/c250aad13167ed8efd65",
+      "optimizer_step": 52000,
+      "training_tokens": 425984000
+    },
+    {
+      "state_index": 5,
+      "state_name": "forum-013000",
+      "model": "forum",
+      "arm": "forum_tech",
+      "kind": "checkpoint",
+      "relative_path": "checkpoints/5a60a06b1b063f90f86c/step-013000",
+      "optimizer_step": 13000,
+      "training_tokens": 106496000
+    },
+    {
+      "state_index": 6,
+      "state_name": "forum-026000",
+      "model": "forum",
+      "arm": "forum_tech",
+      "kind": "checkpoint",
+      "relative_path": "checkpoints/5a60a06b1b063f90f86c/step-026000",
+      "optimizer_step": 26000,
+      "training_tokens": 212992000
+    },
+    {
+      "state_index": 7,
+      "state_name": "forum-039000",
+      "model": "forum",
+      "arm": "forum_tech",
+      "kind": "checkpoint",
+      "relative_path": "checkpoints/5a60a06b1b063f90f86c/step-039000",
+      "optimizer_step": 39000,
+      "training_tokens": 319488000
+    },
+    {
+      "state_index": 8,
+      "state_name": "forum-052000",
+      "model": "forum",
+      "arm": "forum_tech",
+      "kind": "artifact",
+      "relative_path": "artifacts/ae3238fde6675942cac5",
+      "optimizer_step": 52000,
+      "training_tokens": 425984000
+    }
+  ],
+  "low_shot": {
+    "task": "coarse",
+    "categories": [
+      3,
+      8,
+      19,
+      23,
+      26,
+      32
+    ],
+    "input_variant": "title_first_post",
+    "pooling": "masked_mean",
+    "c": 0.01,
+    "budgets_per_class": [
+      16,
+      64,
+      256,
+      1400
+    ],
+    "seeds": [
+      42,
+      43,
+      44,
+      45,
+      46
+    ],
+    "test_examples_per_class": 300,
+    "selection": "nested_sha256_seed_class_sample_id",
+    "scaler": "standard_train_only",
+    "solver": "lbfgs",
+    "l1_ratio": 0.0,
+    "fit_intercept": true,
+    "class_weight": null,
+    "max_iter": 2000,
+    "tolerance": 0.00001,
+    "primary_budget_per_class": 64,
+    "primary_metric": "macro_f1",
+    "primary_contrast": "general_minus_base",
+    "status": "exploratory_post_hoc"
+  },
+  "nll": {
+    "task": "coarse",
+    "categories": [
+      3,
+      8,
+      19,
+      23,
+      26,
+      32
+    ],
+    "examples_per_category": 300,
+    "selection_seed": 47,
+    "selection": "one_per_title_group_sha256",
+    "input": "title_double_newline_first_post",
+    "target": "first_post_only",
+    "max_length": 1024,
+    "truncation_side": "right",
+    "minimum_target_tokens": 32,
+    "batch_size": 4,
+    "runtime_dtype": "bfloat16",
+    "loss_dtype": "float32",
+    "chunk_size": 256,
+    "prior_split_exclusion": "test_only",
+    "primary_contrast": "forum_minus_general"
+  },
+  "statistics": {
+    "low_shot_confidence_interval": "student_t_95_descriptive",
+    "nll_confidence_interval": "paired_stratified_percentile_bootstrap_95",
+    "bootstrap_repetitions": 10000,
+    "bootstrap_seed": 20260829,
+    "report_p_values": false
+  },
+  "output": {
+    "root_env": "PTBR_CLASSIFICATION_ROOT",
+    "relative_path": "diagnostics",
+    "status": "internal_research_only"
+  }
+}

@@ -182,8 +182,8 @@ somente `.venv/bin/python` e mantêm o cache do `uv` em `cache/uv` por padrão.
 | `scripts/submit_classification_evaluation.sh` | Submeter preflight, embeddings, tuning, avaliação final e relatório pareado. |
 | `scripts/classification_embeddings.sbatch` | Extrair embeddings em duas L40S com Gloo e chunks retomáveis. |
 | `scripts/classification_probe.sbatch` | Executar os arrays CPU de regressão logística e os relatórios. |
-| `scripts/submit_classification_diagnostics.sh` | Submeter coorte, low-shot, NLL por estado e relatório diagnóstico. |
-| `scripts/classification_diagnostics_cpu.sbatch` | Executar preparação, low-shot e validações diagnósticas em CPU. |
+| `scripts/submit_classification_diagnostics.sh` | Submeter auditoria, coorte, low-shot, NLL por estado e relatório diagnóstico. |
+| `scripts/classification_diagnostics_cpu.sbatch` | Executar auditoria, preparação, low-shot e validações diagnósticas em CPU. |
 | `scripts/classification_diagnostics_gpu.sbatch` | Executar preflight e NLL em uma L40S, sem DDP/NCCL. |
 
 O fluxo de auditoria, alocação sem reposição e dois treinos pareados de

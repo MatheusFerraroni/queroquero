@@ -12,18 +12,36 @@ import numpy as np
 from queroquero.classification_diagnostics import (
     CATEGORIES,
     CONFIG_SCHEMA,
+    CONFIG_SCHEMA_V2,
+    COHORT_SCHEMA_V1,
+    COHORT_SCHEMA_V2,
     LOW_SHOT_BUDGETS,
+    REPORT_SCHEMA_V1,
+    REPORT_SCHEMA_V2,
+    RESOLVED_SCHEMA_V1,
+    RESOLVED_SCHEMA_V2,
     SEEDS,
     _bootstrap_state_means,
     _build_report_payload,
     _classification_metrics,
+    _cohort_report_metadata,
+    _cohort_schema,
     _encode_nll_batch,
+    _excluded_title_groups,
     _expected_cohort_rows,
+    _low_shot_fits,
+    _low_shot_test_examples,
+    _nll_examples_per_state,
+    _nll_score_total,
     _output_subdirectory,
     _perplexity,
+    _prior_split_exclusion,
+    _report_schema,
+    _resolved_schema,
     _score_nll_batch,
     _target_counts_for_texts,
     _validate_low_shot_unit,
+    audit_cohort,
     first_post_target_mask,
     load_diagnostics_config,
     low_shot_seed,
@@ -41,6 +59,7 @@ from queroquero.classification_eval_common import digest_strings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = PROJECT_ROOT / "configs/classification/diagnostics-v1.json"
+CONFIG_V2_PATH = PROJECT_ROOT / "configs/classification/diagnostics-v2.json"
 
 
 class ClassificationDiagnosticsTests(unittest.TestCase):
@@ -86,6 +105,47 @@ class ClassificationDiagnosticsTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "state path changed"):
             validate_diagnostics_config(wrong_checkpoint)
 
+    def test_v1_and_v2_configs_have_distinct_strict_identities_and_schemas(self) -> None:
+        legacy, legacy_digest = load_diagnostics_config(CONFIG_PATH)
+        current, current_digest = load_diagnostics_config(CONFIG_V2_PATH)
+
+        self.assertEqual(legacy["schema_version"], CONFIG_SCHEMA)
+        self.assertEqual(current["schema_version"], CONFIG_SCHEMA_V2)
+        self.assertNotEqual(legacy_digest, current_digest)
+        self.assertEqual(_prior_split_exclusion(legacy), "all_partitions")
+        self.assertEqual(_prior_split_exclusion(current), "test_only")
+        self.assertEqual(_resolved_schema(legacy), RESOLVED_SCHEMA_V1)
+        self.assertEqual(_resolved_schema(current), RESOLVED_SCHEMA_V2)
+        self.assertEqual(_cohort_schema(legacy), COHORT_SCHEMA_V1)
+        self.assertEqual(_cohort_schema(current), COHORT_SCHEMA_V2)
+        self.assertEqual(_report_schema(legacy), REPORT_SCHEMA_V1)
+        self.assertEqual(_report_schema(current), REPORT_SCHEMA_V2)
+
+        changed_policy = deepcopy(current)
+        changed_policy["nll"]["prior_split_exclusion"] = "all_partitions"
+        with self.assertRaisesRegex(ConfigError, "NLL policy changed"):
+            validate_diagnostics_config(changed_policy)
+
+        unknown_policy = deepcopy(current)
+        unknown_policy["nll"]["prior_split_exclusion"] = "unknown"
+        with self.assertRaisesRegex(ConfigError, "NLL policy changed"):
+            validate_diagnostics_config(unknown_policy)
+
+        self.assertEqual(_nll_examples_per_state(current), 1_800)
+        self.assertEqual(_nll_score_total(current), 16_200)
+        self.assertEqual(_low_shot_test_examples(current), 1_800)
+        self.assertEqual(_low_shot_fits(current), 60)
+        self.assertEqual(
+            _cohort_report_metadata(current),
+            {
+                "threads": 1_800,
+                "categories": 6,
+                "threads_per_category": 300,
+                "novelty_definition": "not_used_in_any_prior_test_partition",
+                "prior_split_exclusion": "test_only",
+            },
+        )
+
     def test_versioned_config_rejects_a_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             link = Path(temporary_dir) / "diagnostics.json"
@@ -102,6 +162,157 @@ class ClassificationDiagnosticsTests(unittest.TestCase):
             (root / "private").symlink_to(outside, target_is_directory=True)
             with self.assertRaisesRegex(RuntimeError, "must not traverse a symlink"):
                 _output_subdirectory(root, "private/nll", "private output")
+
+    def test_v2_excludes_only_prior_test_groups_but_validates_all_partitions(self) -> None:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        legacy, _ = load_diagnostics_config(CONFIG_PATH)
+        current, _ = load_diagnostics_config(CONFIG_V2_PATH)
+        rows = [
+            {"sample_id": "train-only", "title_group_id": "group-train"},
+            {"sample_id": "validation-only", "title_group_id": "group-validation"},
+            {"sample_id": "train-shared", "title_group_id": "group-shared"},
+            {"sample_id": "test-only", "title_group_id": "group-shared"},
+        ]
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            dataset = root / "dataset"
+            dataset.mkdir()
+            pq.write_table(pa.Table.from_pylist(rows), dataset / "examples.parquet")
+            for split in current["splits"]:
+                path = root / split["relative_path"]
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    json.dumps(
+                        {
+                            "benchmark_id": split["benchmark_id"],
+                            "sample_ids": {
+                                "train": ["train-only", "train-shared"],
+                                "validation": ["validation-only"],
+                                "test": ["test-only"],
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            with mock.patch(
+                "queroquero.classification_diagnostics._classification_root",
+                return_value=root,
+            ):
+                self.assertEqual(
+                    _excluded_title_groups(legacy, dataset),
+                    {"group-train", "group-validation", "group-shared"},
+                )
+                self.assertEqual(
+                    _excluded_title_groups(current, dataset),
+                    {"group-shared"},
+                )
+
+                first_path = root / current["splits"][0]["relative_path"]
+                first = json.loads(first_path.read_text(encoding="utf-8"))
+                malformed = deepcopy(first)
+                malformed["sample_ids"]["train"] = "not-a-list"
+                first_path.write_text(json.dumps(malformed), encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, "sample IDs are invalid"):
+                    _excluded_title_groups(current, dataset)
+
+                unresolved = deepcopy(first)
+                unresolved["sample_ids"]["test"] = ["missing-test-id"]
+                first_path.write_text(json.dumps(unresolved), encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, "cannot be resolved"):
+                    _excluded_title_groups(current, dataset)
+
+                altered = deepcopy(first)
+                altered["benchmark_id"] = "0" * 20
+                first_path.write_text(json.dumps(altered), encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, "benchmark changed"):
+                    _excluded_title_groups(current, dataset)
+
+    def test_cohort_capacity_audit_is_aggregate_reusable_and_fail_closed(self) -> None:
+        config, config_sha256 = load_diagnostics_config(CONFIG_V2_PATH)
+
+        def metadata(count: int) -> dict:
+            return {
+                "prior_split_exclusion": "test_only",
+                "excluded_prior_title_groups": 17,
+                "after_prior_split_exclusion_and_deduplication": {
+                    str(category): count + 10 for category in CATEGORIES
+                },
+                "after_minimum_target_tokens": {
+                    str(category): count for category in CATEGORIES
+                },
+                "tokenizer_fingerprint_sha256": "f" * 64,
+            }
+
+        def resolved(diagnostic_id: str) -> dict:
+            return {
+                "diagnostic_id": diagnostic_id,
+                "config_sha256": config_sha256,
+                "classification_dataset_id": config["dataset"][
+                    "classification_dataset_id"
+                ],
+                "dataset_manifest_sha256": "d" * 64,
+                "splits": [{"sha256": "e" * 64}],
+            }
+
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            sufficient_root = root / "sufficient"
+            sufficient_root.mkdir()
+            sufficient_resolved = resolved("a" * 20)
+            with mock.patch(
+                "queroquero.classification_diagnostics.load_diagnostics_config",
+                return_value=(config, config_sha256),
+            ), mock.patch(
+                "queroquero.classification_diagnostics.initialize_diagnostics",
+                return_value=(sufficient_resolved, sufficient_root),
+            ), mock.patch(
+                "queroquero.classification_diagnostics._dataset_path",
+                return_value=root / "dataset",
+            ), mock.patch(
+                "queroquero.classification_diagnostics._cohort_eligible_rows",
+                return_value=({}, metadata(301)),
+            ) as scan:
+                first = audit_cohort(CONFIG_V2_PATH)
+                repeated = audit_cohort(CONFIG_V2_PATH)
+
+            self.assertEqual(first, repeated)
+            self.assertEqual(first["status"], "sufficient")
+            self.assertEqual(first["expected_examples"], 1_800)
+            self.assertEqual(scan.call_count, 1)
+            serialized = json.dumps(first, sort_keys=True)
+            for forbidden in ("sample_id", "title_group_id", "first_post"):
+                self.assertNotIn(forbidden, serialized)
+            self.assertNotIn(str(root), serialized)
+
+            insufficient_root = root / "insufficient"
+            insufficient_root.mkdir()
+            insufficient = metadata(301)
+            insufficient["after_minimum_target_tokens"]["23"] = 299
+            insufficient_resolved = resolved("b" * 20)
+            with mock.patch(
+                "queroquero.classification_diagnostics.load_diagnostics_config",
+                return_value=(config, config_sha256),
+            ), mock.patch(
+                "queroquero.classification_diagnostics.initialize_diagnostics",
+                return_value=(insufficient_resolved, insufficient_root),
+            ), mock.patch(
+                "queroquero.classification_diagnostics._dataset_path",
+                return_value=root / "dataset",
+            ), mock.patch(
+                "queroquero.classification_diagnostics._cohort_eligible_rows",
+                return_value=({}, insufficient),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "capacity is insufficient"):
+                    audit_cohort(CONFIG_V2_PATH)
+            report = json.loads(
+                (insufficient_root / "cohort_capacity.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(report["status"], "insufficient")
+            self.assertEqual(report["after_minimum_target_tokens"]["23"], 299)
 
     def test_state_and_low_shot_unit_indices_are_exact_and_bounded(self) -> None:
         config, _ = load_diagnostics_config(CONFIG_PATH)
@@ -463,6 +674,16 @@ class ClassificationDiagnosticsTests(unittest.TestCase):
         ):
             report, csvs = _build_report_payload(config, resolved, Path("unused"))
 
+        self.assertEqual(report["schema_version"], REPORT_SCHEMA_V1)
+        self.assertEqual(
+            report["conditional_nll"]["cohort"],
+            {
+                "threads": 1_800,
+                "categories": 6,
+                "threads_per_category": 300,
+                "fresh_against_prior_splits": True,
+            },
+        )
         self.assertEqual(len(report["checkpoint_curve"]["accumulated_gains_vs_base"]), 8)
         self.assertIn("checkpoint_accumulated_gains.csv", csvs)
         self.assertEqual(len(report["checkpoint_curve"]["increments"]), 8)
@@ -552,7 +773,11 @@ class ClassificationDiagnosticsTests(unittest.TestCase):
                 },
                 "status": "complete",
             }
-            resolved = {"diagnostic_id": "a" * 20}
+            config, _ = load_diagnostics_config(CONFIG_V2_PATH)
+            resolved = {
+                "diagnostic_id": "a" * 20,
+                "low_shot": config["low_shot"],
+            }
             _validate_low_shot_unit(value, resolved, output, 0, 42)
             tampered = deepcopy(value)
             tampered["results"][0]["accuracy"] = 0.9
@@ -656,6 +881,7 @@ class ClassificationDiagnosticsTests(unittest.TestCase):
         self.assertIn("--mem=64G", submit)
         self.assertIn("--gres=gpu:L40S:1", submit)
         for mode in (
+            "audit-cohort",
             "prepare-cohort",
             "validate-cohort",
             "preflight",
@@ -667,6 +893,9 @@ class ClassificationDiagnosticsTests(unittest.TestCase):
         ):
             with self.subTest(mode=mode):
                 self.assertIn(mode, submit)
+
+        self.assertIn("configs/classification/diagnostics-v2.json", cpu)
+        self.assertIn("configs/classification/diagnostics-v2.json", gpu)
 
         self.assertIn("#SBATCH --cpus-per-task=16", cpu)
         self.assertIn("#SBATCH --mem=64G", cpu)
