@@ -1,0 +1,32 @@
+{
+  "schema_version": "queroquero-intrinsic-holdout-config/v1",
+  "seed": 73129,
+  "sequence_length": 1024,
+  "eval_sequences": 256,
+  "candidate_threads": 8192,
+  "candidate_sequences": 4096,
+  "max_member_bytes": 4194304,
+  "match_batch_sequences": 512,
+  "reject_match_tokens": 32,
+  "original_loss_tolerance": 0.001,
+  "paired_report_path": "runs/paired-experiment-report.json",
+  "paired_report_id": "8c7ec8d2317571ce4f48",
+  "cpt_manifest_sha256": "45598ad637a8d7e709fcca7b6c9ff3ff303f9c23d847fdac4694af2755c2cc65",
+  "archive": "adrenaline/conversations.zip",
+  "dataset_root_env": "PTBR_DATASET_ROOT",
+  "prepared_root_env": "PTBR_OUTPUT_ROOT",
+  "output_root_env": "PTBR_INTRINSIC_ROOT",
+  "output_default": "outputs/intrinsic-holdout",
+  "models": {
+    "general": {
+      "artifact_id": "c250aad13167ed8efd65",
+      "artifact_sha256": "b694160dff92da42e2d12ce247928e208f3c0385a115ac2db359926e8dd3c540",
+      "run_id": "3cfe6f183912c25b859a"
+    },
+    "forum": {
+      "artifact_id": "ae3238fde6675942cac5",
+      "artifact_sha256": "74046c639049eb76c58696127c469a24ecf8f0637b640d64fa9ab2072f269627",
+      "run_id": "5a60a06b1b063f90f86c"
+    }
+  }
+}

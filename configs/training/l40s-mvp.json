@@ -1,0 +1,94 @@
+{
+  "schema_version": "queroquero-training-config/v2",
+  "profile": "mvp",
+  "model": {
+    "model_id": "Polygl0t/Tucano2-0.6B-Base",
+    "revision": "dad97dc864a8f9a1d240fb9351d098f3af9511d7",
+    "trust_remote_code": false,
+    "model_type": "llama",
+    "parameter_count": 670127616,
+    "native_context_length": 4096
+  },
+  "datasets": [
+    {
+      "dataset_id": "adrenaline",
+      "weight": 1,
+      "train_sequences": 256,
+      "eval_sequences": 32
+    },
+    {
+      "dataset_id": "brwac",
+      "weight": 1,
+      "train_sequences": 256,
+      "eval_sequences": 32
+    },
+    {
+      "dataset_id": "gigaverbo",
+      "weight": 1,
+      "train_sequences": 256,
+      "eval_sequences": 32
+    },
+    {
+      "dataset_id": "multiwoz_ptbr",
+      "weight": 1,
+      "train_sequences": 256,
+      "eval_sequences": 32
+    },
+    {
+      "dataset_id": "outerspace",
+      "weight": 1,
+      "train_sequences": 256,
+      "eval_sequences": 32
+    },
+    {
+      "dataset_id": "wackywacky",
+      "weight": 1,
+      "train_sequences": 256,
+      "eval_sequences": 32
+    }
+  ],
+  "training": {
+    "method": "full_parameter_continual_pretraining",
+    "sequence_length": 1024,
+    "seed": 42,
+    "epochs": 1,
+    "micro_batch_size_per_rank": 1,
+    "gradient_accumulation_steps_per_rank": 4,
+    "global_batch_sequences": 8,
+    "global_batch_tokens": 8192,
+    "optimizer": "adamw",
+    "optimizer_implementation": "torch_fused",
+    "learning_rate": 0.000005,
+    "warmup_steps": 20,
+    "scheduler": "linear",
+    "weight_decay": 0.1,
+    "betas": [0.9, 0.95],
+    "epsilon": 0.00000001,
+    "max_grad_norm": 1.0,
+    "precision": "bf16",
+    "use_grad_scaler": false,
+    "gradient_checkpointing": true,
+    "checkpoint_steps": [96],
+    "total_optimizer_steps": 192
+  },
+  "execution": {
+    "strategy": "ddp",
+    "backend": "nccl",
+    "world_size": 2,
+    "processes_per_node": 2
+  },
+  "hardware": {
+    "accelerator": "cuda",
+    "visible_gpus": 2,
+    "gpu_name_contains": "L40S",
+    "compute_capability": [8, 9],
+    "minimum_memory_gib": 44,
+    "torch_cuda": "11.8",
+    "required_arch": "sm_89"
+  },
+  "output": {
+    "runs_root": "runs",
+    "checkpoints_root": "checkpoints",
+    "artifacts_root": "artifacts"
+  }
+}

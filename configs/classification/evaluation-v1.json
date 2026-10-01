@@ -1,0 +1,170 @@
+{
+  "classifier": {
+    "c_grid": [
+      0.01,
+      0.1,
+      1.0,
+      10.0
+    ],
+    "class_weight": null,
+    "fit_intercept": true,
+    "l1_ratio": 0.0,
+    "max_iter": 2000,
+    "refit": "train_validation",
+    "scaler": "standard",
+    "selection_metric": "macro_f1",
+    "selection_scope": "shared_models_seeds_per_task_input",
+    "solver": "lbfgs",
+    "tolerance": 1e-05
+  },
+  "dataset": {
+    "classification_dataset_id": "dc4b2ce164eab81812a2",
+    "relative_path": "adrenaline/dc4b2ce164eab81812a2",
+    "root_env": "PTBR_CLASSIFICATION_ROOT"
+  },
+  "embedding": {
+    "batch_size_per_rank": 8,
+    "chunk_size_per_rank": 4096,
+    "exclude_special_tokens": true,
+    "input_variants": {
+      "title": "title",
+      "title_first_post": "title_double_newline_first_post"
+    },
+    "layer": "last_hidden_state",
+    "max_length": 1024,
+    "output_dtype": "float32",
+    "poolings": [
+      "masked_mean",
+      "last_content"
+    ],
+    "runtime_dtype": "bfloat16",
+    "truncation_side": "right",
+    "world_size": 2
+  },
+  "models": {
+    "base": {
+      "kind": "huggingface",
+      "model_id": "Polygl0t/Tucano2-0.6B-Base",
+      "revision": "dad97dc864a8f9a1d240fb9351d098f3af9511d7"
+    },
+    "forum": {
+      "artifact_id": "ae3238fde6675942cac5",
+      "artifact_sha256": "74046c639049eb76c58696127c469a24ecf8f0637b640d64fa9ab2072f269627",
+      "expected_arm": "forum_tech",
+      "kind": "local_artifact",
+      "relative_path": "artifacts/ae3238fde6675942cac5"
+    },
+    "general": {
+      "artifact_id": "c250aad13167ed8efd65",
+      "artifact_sha256": "b694160dff92da42e2d12ce247928e208f3c0385a115ac2db359926e8dd3c540",
+      "expected_arm": "general",
+      "kind": "local_artifact",
+      "relative_path": "artifacts/c250aad13167ed8efd65"
+    }
+  },
+  "output": {
+    "relative_path": "evaluations",
+    "root_env": "PTBR_CLASSIFICATION_ROOT",
+    "status": "internal_research_only"
+  },
+  "paired_report": {
+    "relative_path": "runs/paired-experiment-report.json",
+    "report_id": "8c7ec8d2317571ce4f48"
+  },
+  "schema_version": "queroquero-classification-evaluation-config/v1",
+  "splits": [
+    {
+      "benchmark_id": "78cd03cb7fd30fc12e50",
+      "relative_path": "splits/coarse/seed-42/split_manifest.json",
+      "seed": 42,
+      "task": "coarse"
+    },
+    {
+      "benchmark_id": "7dba0bfa0c295e9097c0",
+      "relative_path": "splits/fine/seed-42/split_manifest.json",
+      "seed": 42,
+      "task": "fine"
+    },
+    {
+      "benchmark_id": "863f4d5b94ff875b4e30",
+      "relative_path": "splits/coarse/seed-43/split_manifest.json",
+      "seed": 43,
+      "task": "coarse"
+    },
+    {
+      "benchmark_id": "e047f1b1c3bf2b6c4737",
+      "relative_path": "splits/fine/seed-43/split_manifest.json",
+      "seed": 43,
+      "task": "fine"
+    },
+    {
+      "benchmark_id": "71f09348e74ede0bf4e7",
+      "relative_path": "splits/coarse/seed-44/split_manifest.json",
+      "seed": 44,
+      "task": "coarse"
+    },
+    {
+      "benchmark_id": "d9161ecc5ffa9280058c",
+      "relative_path": "splits/fine/seed-44/split_manifest.json",
+      "seed": 44,
+      "task": "fine"
+    },
+    {
+      "benchmark_id": "667b9959a18e6dffb84f",
+      "relative_path": "splits/coarse/seed-45/split_manifest.json",
+      "seed": 45,
+      "task": "coarse"
+    },
+    {
+      "benchmark_id": "b4462bc1bbecf3d0ee9d",
+      "relative_path": "splits/fine/seed-45/split_manifest.json",
+      "seed": 45,
+      "task": "fine"
+    },
+    {
+      "benchmark_id": "28c633d843f18bd47dcd",
+      "relative_path": "splits/coarse/seed-46/split_manifest.json",
+      "seed": 46,
+      "task": "coarse"
+    },
+    {
+      "benchmark_id": "092f9915032878ddf706",
+      "relative_path": "splits/fine/seed-46/split_manifest.json",
+      "seed": 46,
+      "task": "fine"
+    }
+  ],
+  "statistics": {
+    "confidence_interval": "student_t_95",
+    "pairwise_contrasts": [
+      {
+        "first": "base",
+        "name": "continual_pretraining",
+        "second": "general"
+      },
+      {
+        "first": "general",
+        "name": "domain_proximity",
+        "second": "forum"
+      },
+      {
+        "first": "base",
+        "name": "total_practical_gain",
+        "second": "forum"
+      }
+    ],
+    "primary_endpoint": {
+      "input_variant": "title_first_post",
+      "metric": "macro_f1",
+      "task": "coarse"
+    },
+    "report_p_values": false,
+    "seeds": [
+      42,
+      43,
+      44,
+      45,
+      46
+    ]
+  }
+}
